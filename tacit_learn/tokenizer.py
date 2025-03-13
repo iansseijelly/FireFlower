@@ -123,6 +123,10 @@ class Disassembler:
 
 
 class Tokenizer:
+    """
+    A tokenizer for the Spike trace.
+    """
+
     METATOKEN = {
         "[S]": 0,   # start of instruction
         "[E]": 1,   # end of instruction
@@ -135,12 +139,7 @@ class Tokenizer:
         "RD": 8,    # rd
         "IMM": 9,   # immediate
     }
-    
 
-    
-    """
-    A tokenizer for the Spike trace.
-    """
     def __init__(self):
         pass
 
