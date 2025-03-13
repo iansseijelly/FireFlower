@@ -5,6 +5,9 @@ import torch
 
 
 class Disassembler:
+
+    COMPRESSED_MASK = 0x3
+
     OPCODE_POS = 0
     RD_POS = 7
     FUNC3_POS = 12
@@ -38,42 +41,48 @@ class Disassembler:
         """
         Disassemble the instruction.
         """
-        opcode = inst & Disassembler.OPCODE_MASK
-        opcode_type = Disassembler.OPCODE_MAP[opcode]
-        match (opcode_type):
-            case "R":
-                func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
-                func7 = (inst & Disassembler.FUNC7_MASK) >> Disassembler.FUNC7_POS
-                rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
-                rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
-                rs2 = (inst & Disassembler.RS2_MASK) >> Disassembler.RS2_POS
-                return opcode, func3, func7, rd, rs1, rs2, None
-            case "I":
-                func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
-                rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
-                rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
-                imm = Disassembler.i_get_imm(inst)
-                return opcode, func3, None, rd, rs1, None, imm
-            case "U":
-                rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
-                imm = Disassembler.u_get_imm(inst)
-                return opcode, None, None, rd, None, None, imm
-            case "SB":
-                func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
-                rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
-                rs2 = (inst & Disassembler.RS2_MASK) >> Disassembler.RS2_POS
-                imm = Disassembler.sb_get_imm(inst)
-                return opcode, func3, None, None, rs1, rs2, imm
-            case "UJ":
-                rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
-                imm = Disassembler.uj_get_imm(inst)
-                return opcode, None, None, None, rd, None, imm
-            case "S":
-                func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
-                rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
-                rs2 = (inst & Disassembler.RS2_MASK) >> Disassembler.RS2_POS
-                imm = Disassembler.s_get_imm(inst)
-                return opcode, func3, None, None, rs1, rs2, imm
+        
+        is_compressed = (inst & Disassembler.COMPRESSED_MASK) != 0b11
+        if is_compressed:
+            return None, None, None, None, None, None, None
+        
+        else:
+            opcode = inst & Disassembler.OPCODE_MASK
+            opcode_type = Disassembler.OPCODE_MAP[opcode]
+            match (opcode_type):
+                case "R":
+                    func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
+                    func7 = (inst & Disassembler.FUNC7_MASK) >> Disassembler.FUNC7_POS
+                    rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
+                    rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
+                    rs2 = (inst & Disassembler.RS2_MASK) >> Disassembler.RS2_POS
+                    return opcode, func3, func7, rd, rs1, rs2, None
+                case "I":
+                    func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
+                    rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
+                    rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
+                    imm = Disassembler.i_get_imm(inst)
+                    return opcode, func3, None, rd, rs1, None, imm
+                case "U":
+                    rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
+                    imm = Disassembler.u_get_imm(inst)
+                    return opcode, None, None, rd, None, None, imm
+                case "SB":
+                    func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
+                    rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
+                    rs2 = (inst & Disassembler.RS2_MASK) >> Disassembler.RS2_POS
+                    imm = Disassembler.sb_get_imm(inst)
+                    return opcode, func3, None, None, rs1, rs2, imm
+                case "UJ":
+                    rd = (inst & Disassembler.RD_MASK) >> Disassembler.RD_POS
+                    imm = Disassembler.uj_get_imm(inst)
+                    return opcode, None, None, None, rd, None, imm
+                case "S":
+                    func3 = (inst & Disassembler.FUNC3_MASK) >> Disassembler.FUNC3_POS
+                    rs1 = (inst & Disassembler.RS1_MASK) >> Disassembler.RS1_POS
+                    rs2 = (inst & Disassembler.RS2_MASK) >> Disassembler.RS2_POS
+                    imm = Disassembler.s_get_imm(inst)
+                    return opcode, func3, None, None, rs1, rs2, imm
 
     @staticmethod
     def i_get_imm(inst: int) -> int:
