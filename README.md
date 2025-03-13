@@ -9,5 +9,6 @@ conda activate tacit-learn
 
 ```bash
 pip install -r requirements.txt
+pip install -e .
 ```
 
