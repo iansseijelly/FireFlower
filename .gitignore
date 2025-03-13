@@ -175,3 +175,5 @@ cython_debug/
 
 # conda environment
 .conda-env/
+
+cache/

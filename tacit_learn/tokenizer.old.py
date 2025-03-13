@@ -143,9 +143,12 @@ class Tokenizer:
     def __init__(self):
         pass
 
-    def tokenize(self, trace: str) -> torch.Tensor:
+    def __call__(self, trace: str, return_tensors: str = "pt") -> torch.Tensor:
+        return self.tokenize(trace, return_tensors)
+
+    def trace_to_vec(self, trace: str) -> torch.Tensor:
         """
-        Tokenize the trace.
+        Convert the trace to a vector.
         """
         lines = trace.split("\n")
 
@@ -245,7 +248,12 @@ class Tokenizer:
             tokens.append(t)
 
         return torch.tensor(tokens, dtype=torch.float32)
+    
+    def tokenize(self, trace: str, return_tensors: str = "pt") -> torch.Tensor:
+        vec = self.trace_to_vec(trace)
+        
 
+        
     def _disassemble_inst(self, inst: int) -> list[int]:
         """
         Disassemble the instruction.
