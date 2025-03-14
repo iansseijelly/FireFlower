@@ -1,5 +1,5 @@
 
-from tacit_learn.tokenizer import Tokenizer
+from tacit_learn.preprocessor import Preprocessor
 
 
 example_input = """
@@ -15,12 +15,12 @@ C0:      16736 [1] pc=[00000000800007d0] W[r 1=00000000800007d4][1] R[r 0=000000
 """
 
 
-tokenizer = Tokenizer()
+preprocessor = Preprocessor()
 
-tokens = tokenizer.tokenize(example_input)
-print(tokens)
+encoded_input = preprocessor.encode(example_input)
 
-detokenized = tokenizer.detokenize(tokens)
-print(detokenized)
+preprocessor.print_encoded(encoded_input)
+
+
 
 
