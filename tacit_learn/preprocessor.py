@@ -139,6 +139,19 @@ class Preprocessor:
         0b1100111: "I",
     }
 
+    meta_tokens = {
+        "START": "START",
+        "END": "END",
+        "TIMESTAMP": "TIMESTAMP",
+        "OPCODE": "OPCODE",
+        "RS1": "RS1",
+        "RS2": "RS2",
+        "RD": "RD",
+        "FUNCT3": "FUNCT3",
+        "FUNCT7": "FUNCT7",
+        "IMM": "IMM",
+    }
+
     def __init__(self):
         pass
 
@@ -149,6 +162,8 @@ class Preprocessor:
         lines = trace.split("\n")
 
         result = ""
+
+        prev_timestamp = None
 
         for line in lines:
             # split the line at whitespace, treat consecutive whitespace as a single delimiter
@@ -162,6 +177,12 @@ class Preprocessor:
             # valid = valid == "[1]"
 
             timestamp = int(timestamp)
+            if prev_timestamp is not None:
+                delta_time = timestamp - prev_timestamp
+            else:
+                delta_time = 0
+            
+            prev_timestamp = timestamp
 
             # pc = pc.replace("pc=[", "").replace("]", "")
             # pc = int(pc, 16)
@@ -175,20 +196,20 @@ class Preprocessor:
                 print(f"Warning: Invalid instruction: {inst}")
                 continue
 
-            result += "[S]"
-            result += f"[TIMESTAMP]{timestamp}"
-            result += f"[OPCODE]{opcode}"
+            result += f"{Preprocessor.meta_tokens['START']}"
+            result += f" {Preprocessor.meta_tokens['TIMESTAMP']} {delta_time}"
+            result += f" {Preprocessor.meta_tokens['OPCODE']} {opcode}"
             
             if funct3 is not None:
-                result += f"[FUNCT3]{funct3}"
+                result += f" {Preprocessor.meta_tokens['FUNCT3']} {funct3}"
             if funct7 is not None:
-                result += f"[FUNCT7]{funct7}"
+                result += f" {Preprocessor.meta_tokens['FUNCT7']} {funct7}"
             if rd is not None:
-                result += f"[RD]{rd}"
+                result += f" {Preprocessor.meta_tokens['RD']} {rd}"
             if rs1 is not None:
-                result += f"[RS1]{rs1}"
+                result += f" {Preprocessor.meta_tokens['RS1']} {rs1}"
             if rs2 is not None:
-                result += f"[RS2]{rs2}"
+                result += f" {Preprocessor.meta_tokens['RS2']} {rs2}"
             if imm is not None:
                 if imm > 999:
                     imm = 999
@@ -196,11 +217,11 @@ class Preprocessor:
                 if imm < -999:
                     imm = -999
                     print(f"Warning: IMM is too small: {imm}")
-                result += f"[IMM]{imm}"
-            result += "[E]"
+                result += f" {Preprocessor.meta_tokens['IMM']} {imm}"
+            result += f" {Preprocessor.meta_tokens['END']} "
 
         return result
 
     def print_encoded(self, encoded: str):
-        encoded = encoded.replace("[E]", "[E]\n")
+        encoded = encoded.replace(Preprocessor.meta_tokens['END'], f"{Preprocessor.meta_tokens['END']}\n")
         print(encoded)

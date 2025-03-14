@@ -2,20 +2,16 @@
 Given a vocab file, generate the rest of unused tokens to make it a total of 30522 lines
 """
 
-import sys
+from tacit_learn.preprocessor import Preprocessor
+
 
 meta_tokens = [
-    "[S]",
-    "[E]",
-    "[TIMESTAMP]",
-    "[OPCODE]",
-    "[RS1]",
-    "[RS2]",
-    "[RD]",
-    "[FUNCT3]",
-    "[FUNCT7]",
-    "[IMM]",
-]
+    "[PAD]",
+    "[UNK]",
+    "[CLS]",
+    "[SEP]",
+    "[MASK]",
+] + list(Preprocessor.meta_tokens.keys())
 
 riscv_vocabs = [
     "unimp",

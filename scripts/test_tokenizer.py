@@ -1,3 +1,5 @@
+from transformers import BertForMaskedLM, BertTokenizer
+import torch
 
 from tacit_learn.preprocessor import Preprocessor
 
@@ -15,12 +17,21 @@ C0:      16736 [1] pc=[00000000800007d0] W[r 1=00000000800007d4][1] R[r 0=000000
 """
 
 
+# Load the tokenizer from the saved files (this will load all the configurations and "weights")
+tokenizer = BertTokenizer(vocab_file="vocab.txt", model_max_length=512, do_lower_case=False)
+
 preprocessor = Preprocessor()
 
 encoded_input = preprocessor.encode(example_input)
 
-preprocessor.print_encoded(encoded_input)
+# preprocessor.print_encoded(encoded_input)
+print(encoded_input)
+
+tokens = tokenizer(encoded_input, return_tensors="pt")
+
+print(tokens)
 
 
-
-
+for i in range(len(tokens["input_ids"][0])):
+    token = tokenizer.decode(tokens["input_ids"][0][i])
+    print(token, end=" ")

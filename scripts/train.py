@@ -1,6 +1,5 @@
 from transformers import AutoTokenizer, BertForMaskedLM, BertTokenizer
 import torch
-import os
 
 # Load pretrained tokenizer and model
 pretrained_tokenizer = AutoTokenizer.from_pretrained("google-bert/bert-base-uncased", cache_dir="cache")
