@@ -312,6 +312,16 @@ class Tokenizer(BertTokenizer):
         
         print(f"Updated vocabulary file now has {self.total_tokens} tokens.")
     
+    def __call__(self, text: str, return_tensors: str = "pt") -> dict:
+        tokens = super().__call__(text, 
+                                return_tensors=return_tensors, 
+                                truncation=True, 
+                                max_length=32,  # max possible sequence length
+                                padding="max_length",
+                                # padding="do_not_pad",
+                                )
+        return tokens
+
     @property
     def num_tokens(self) -> int:
         return self.total_tokens

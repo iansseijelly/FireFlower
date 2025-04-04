@@ -22,7 +22,7 @@ print(f"Loaded model from {model_path}")
 def predict_masked_token(model, tokenizer, text):
     """Predict the masked tokens in the input text"""
     # Encode the input
-    encoded_input = tokenizer(text, return_tensors="pt")
+    encoded_input = tokenizer(text)
     encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
     
     # Find mask token positions
@@ -31,7 +31,7 @@ def predict_masked_token(model, tokenizer, text):
     if mask_positions[0].shape[0] == 0:
         print("No mask token found in the input!")
         return None
-    
+
     # Generate predictions
     with torch.no_grad():
         outputs = model(**encoded_input)

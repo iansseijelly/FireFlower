@@ -21,10 +21,10 @@ tokenizer = Tokenizer()
 # Create custom config with actual vocab size
 config = BertConfig(
     vocab_size=tokenizer.num_tokens,
-    hidden_size=512,
+    hidden_size=64,
     num_hidden_layers=8,
-    num_attention_heads=8,
-    intermediate_size=2048
+    num_attention_heads=4,
+    intermediate_size=512
 )
 
 model = BertForMaskedLM(config)
@@ -81,11 +81,7 @@ class MaskingDataset(Dataset):
         # Skip if no maskable positions
         if not maskable_positions:
             raise Exception("No maskable positions found")
-            return self.tokenizer(self.examples[idx], 
-                                 return_tensors="pt", 
-                                 truncation=True, 
-                                 max_length=512, 
-                                 padding="max_length")
+            return self.tokenizer(self.examples[idx])
         
         # Create a masked version (for model input)
         masked_tokens = tokens.copy()
@@ -99,24 +95,10 @@ class MaskingDataset(Dataset):
         masked_text = " ".join(masked_tokens)
         original_text = " ".join(tokens)
         
-        max_possible_sequence_length = 16
-
         # Tokenize both versions
-        masked_encoding = self.tokenizer(masked_text, 
-                                        return_tensors="pt", 
-                                        truncation=True, 
-                                        max_length=max_possible_sequence_length, 
-                                        padding="max_length",
-                                        # padding="do_not_pad",
-                                        )
+        masked_encoding = self.tokenizer(masked_text)
         
-        label_encoding = self.tokenizer(original_text, 
-                                       return_tensors="pt", 
-                                       truncation=True, 
-                                       max_length=max_possible_sequence_length, 
-                                       padding="max_length",
-                                    #    padding="do_not_pad",
-                                       )
+        label_encoding = self.tokenizer(original_text)
         
         # Prepare final encoding
         encoding = {
@@ -131,14 +113,14 @@ class MaskingDataset(Dataset):
 
 # Create dataset and dataloader
 train_dataset = MaskingDataset(training_data, tokenizer)
-train_dataloader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 num_training_data = len(train_dataset)
 print(f"Created dataset with {num_training_data} lines of training data")
 
 # Initialize optimizer and scheduler
 from torch.optim import AdamW
 
-optimizer = AdamW(model.parameters(), lr=5e-5)
+optimizer = AdamW(model.parameters(), lr=1e-4)
 
 from transformers import get_scheduler
 
@@ -159,7 +141,7 @@ example_inputs = [
 
 def predict_masked_token(model, tokenizer, text):
     # Encode the input
-    encoded_input = tokenizer(text, return_tensors="pt")
+    encoded_input = tokenizer(text)
     encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
     
     # Find mask token positions
