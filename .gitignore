@@ -177,3 +177,7 @@ cython_debug/
 .conda-env/
 
 cache/
+
+# Training data
+logs/
+trained_model/

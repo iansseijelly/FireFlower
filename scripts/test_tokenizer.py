@@ -1,8 +1,11 @@
 from tacit_learn.tokenizer import Tokenizer
 
 
-with open("example_input.txt", "r") as f:
+with open("./data/baremetal_startup.txt", "r") as f:
     example_input = f.read()
+
+
+example_input = example_input[:100]
 
 # print(example_input)
 

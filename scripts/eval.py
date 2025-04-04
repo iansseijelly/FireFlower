@@ -12,7 +12,7 @@ model = BertForMaskedLM.from_pretrained("google-bert/bert-base-uncased", cache_d
 
 
 # Load the tokenizer from the saved files (this will load all the configurations and "weights")
-tokenizer = BertTokenizer(vocab_file="vocab.txt", model_max_length=512)
+tokenizer = BertTokenizer(vocab_file="vocab/riscv_vocab.txt", model_max_length=512)
 
 # Now use the properly initialized tokenizer
 inputs = tokenizer(input_str, return_tensors="pt")

@@ -25,7 +25,7 @@ writer = SummaryWriter(log_dir)
 print(f"TensorBoard logs will be saved to {log_dir}")
 
 # Load training data
-with open("example_input.txt", "r") as f:
+with open("./data/baremetal_startup.txt", "r") as f:
     examples = f.read().strip().split("\n")
 
 print(f"Loaded {len(examples)} examples")
@@ -260,8 +260,8 @@ writer.close()
 
 # Save the model
 print("Saving model...")
-model.save_pretrained("masked_model")
-tokenizer.save_pretrained("masked_model")
+model.save_pretrained("trained_model")
+tokenizer.save_pretrained("trained_model")
 print("Model saved!")
 
 # Evaluate model on test examples

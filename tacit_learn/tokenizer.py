@@ -264,7 +264,7 @@ class Tokenizer(BertTokenizer):
         self._generate_vocab()
         
         super().__init__(
-            vocab_file="vocab.txt",
+            vocab_file="vocab/riscv_vocab.txt",
             do_lower_case=False,
             do_basic_tokenize=True,
             never_split=Tokenizer.RISC_V_VOCABS,
@@ -300,7 +300,7 @@ class Tokenizer(BertTokenizer):
             vocab_content.append(f"[unused{i}]")
 
         # Then append the unused tokens
-        with open("vocab.txt", "w") as f:
+        with open("vocab/riscv_vocab.txt", "w") as f:
             for token in vocab_content:
                 f.write(f"{token}\n")
         
