@@ -1,31 +1,106 @@
-from transformers import AutoTokenizer, BertForMaskedLM, BertTokenizer
-
-from tacit_learn.tokenizer import Preprocessor
-
-
-# Load pretrained tokenizer and model
-pretrained_tokenizer = AutoTokenizer.from_pretrained("google-bert/bert-base-uncased", cache_dir="cache")
-model = BertForMaskedLM.from_pretrained("google-bert/bert-base-uncased", cache_dir="cache")
+import torch
+import os
+from transformers import BertForMaskedLM
+from tacit_learn.tokenizer import Tokenizer
 
 
+# Set the device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 
+# Path to the saved model checkpoint
+model_path = "trained_model"
 
-# Load the tokenizer from the saved files (this will load all the configurations and "weights")
-tokenizer = BertTokenizer(vocab_file="vocab/riscv_vocab.txt", model_max_length=512)
+# Load tokenizer and model from checkpoint
+tokenizer = Tokenizer()
+model = BertForMaskedLM.from_pretrained(model_path).to(device)
+model.eval()
 
-# Now use the properly initialized tokenizer
-inputs = tokenizer(input_str, return_tensors="pt")
+print(f"Loaded model from {model_path}")
 
-with torch.no_grad():
-    logits = model(**inputs).logits
+def predict_masked_token(model, tokenizer, text):
+    """Predict the masked tokens in the input text"""
+    # Encode the input
+    encoded_input = tokenizer(text, return_tensors="pt")
+    encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
+    
+    # Find mask token positions
+    mask_positions = (encoded_input["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)
+    
+    if mask_positions[0].shape[0] == 0:
+        print("No mask token found in the input!")
+        return None
+    
+    # Generate predictions
+    with torch.no_grad():
+        outputs = model(**encoded_input)
+    
+    # Get predictions for all mask positions
+    results = []
+    for batch_idx, pos in zip(mask_positions[0], mask_positions[1]):
+        # Get top 5 predictions
+        logits = outputs.logits[batch_idx, pos, :]
+        top_5_tokens = torch.topk(logits, 5, dim=0)
+        top_token_ids = top_5_tokens.indices.tolist()
+        top_token_probs = torch.softmax(top_5_tokens.values, dim=0).tolist()
+        
+        # Convert token IDs to words
+        top_tokens = [tokenizer.decode([token_id]) for token_id in top_token_ids]
+        
+        results.append({
+            "position": pos.item(),
+            "top_predictions": [
+                {"token": token, "probability": prob} 
+                for token, prob in zip(top_tokens, top_token_probs)
+            ]
+        })
+    
+    return results
 
-# retrieve index of [MASK]
-mask_token_index = (inputs.input_ids == tokenizer.mask_token_id)[0].nonzero(as_tuple=True)[0]
+# Define test examples
+test_examples = [
+    "x0 x0 [MASK] x0 x0 x0 x0 x0 x0 x0 x0 x0 x0 x0 x0",
+    "START INST [MASK] RD x2 RS1 x0 IMM 10 TIMESTAMP 0 END",
+    "START INST sw RS1 x8 RS2 [MASK] IMM 0 TIMESTAMP 0 END",
+    # Add more examples here as needed
+]
 
-predicted_token_id = logits[0, mask_token_index].argmax(axis=-1)
-predicted_word = tokenizer.decode(predicted_token_id)
-print(f"Predicted word: {predicted_word}")
+# Run predictions on each example
+print("\n=== Running mask filling predictions ===")
 
-# For loss calculation
-labels = tokenizer(input_ref, return_tensors="pt")["input_ids"]
+for i, example in enumerate(test_examples):
+    print(f"\nExample {i+1}: {example}")
+    predictions = predict_masked_token(model, tokenizer, example)
+    
+    if predictions:
+        for p in predictions:
+            print(f"Position {p['position']}:")
+            for pred in p["top_predictions"]:
+                print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
+    else:
+        print("No predictions generated.")
+
+# Function to test with custom input
+def test_custom_input():
+    while True:
+        user_input = input("\nEnter a masked sentence to predict (or 'q' to quit): ")
+        if user_input.lower() == 'q':
+            break
+            
+        if "[MASK]" not in user_input:
+            print("Input must contain [MASK] token.")
+            continue
+            
+        predictions = predict_masked_token(model, tokenizer, user_input)
+        
+        if predictions:
+            for p in predictions:
+                print(f"Position {p['position']}:")
+                for pred in p["top_predictions"]:
+                    print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
+        else:
+            print("No predictions generated.")
+
+# Uncomment the line below to enable interactive testing
+# test_custom_input()

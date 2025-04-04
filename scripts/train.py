@@ -5,10 +5,29 @@ import numpy as np
 import os
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-from transformers import BertForMaskedLM
+from transformers import BertForMaskedLM, BertConfig
 from torch.utils.data import DataLoader, Dataset
 
 from tacit_learn.tokenizer import Tokenizer
+
+
+
+# training_data = "./data/dummy.txt"
+training_data = "./data/baremetal_startup.txt"
+
+# Initialize tokenizer and model
+tokenizer = Tokenizer()
+
+# Create custom config with actual vocab size
+config = BertConfig(
+    vocab_size=tokenizer.num_tokens,  # e.g., 1000 or whatever you need
+    hidden_size=768,
+    num_hidden_layers=12,
+    num_attention_heads=12,
+    intermediate_size=3072
+)
+
+model = BertForMaskedLM(config)
 
 
 # Set seed for reproducibility
@@ -25,20 +44,16 @@ writer = SummaryWriter(log_dir)
 print(f"TensorBoard logs will be saved to {log_dir}")
 
 # Load training data
-with open("./data/baremetal_startup.txt", "r") as f:
-    examples = f.read().strip().split("\n")
+print(f"Loading training data from {training_data}")
+with open(training_data, "r") as f:
+    training_data = f.read().strip().split("\n")
 
-print(f"Loaded {len(examples)} examples")
-
-
-# Initialize tokenizer and model
-tokenizer = Tokenizer()
-model = BertForMaskedLM.from_pretrained("google-bert/bert-base-uncased", cache_dir="cache").to(device)
+print(f"Loaded {len(training_data)} lines of training data")
 
 
-# randomize model weights
+# Still randomize if training from scratch
 for param in model.parameters():
-    param.data = torch.randn_like(param.data)
+    param.data[:] = torch.randn_like(param.data)
 
 
 # Create masked input dataset
@@ -61,6 +76,7 @@ class MaskingDataset(Dataset):
         
         # Skip if no maskable positions
         if not maskable_positions:
+            raise Exception("No maskable positions found")
             return self.tokenizer(self.examples[idx], 
                                  return_tensors="pt", 
                                  truncation=True, 
@@ -79,35 +95,41 @@ class MaskingDataset(Dataset):
         masked_text = " ".join(masked_tokens)
         original_text = " ".join(tokens)
         
+        max_possible_sequence_length = 16
+
         # Tokenize both versions
         masked_encoding = self.tokenizer(masked_text, 
                                         return_tensors="pt", 
                                         truncation=True, 
-                                        max_length=512, 
-                                        padding="max_length")
+                                        max_length=max_possible_sequence_length, 
+                                        padding="max_length",
+                                        # padding="do_not_pad",
+                                        )
         
         label_encoding = self.tokenizer(original_text, 
                                        return_tensors="pt", 
                                        truncation=True, 
-                                       max_length=512, 
-                                       padding="max_length")
+                                       max_length=max_possible_sequence_length, 
+                                       padding="max_length",
+                                    #    padding="do_not_pad",
+                                       )
         
         # Prepare final encoding
         encoding = {
             "input_ids": masked_encoding["input_ids"][0],
             "token_type_ids": masked_encoding["token_type_ids"][0],
             "attention_mask": masked_encoding["attention_mask"][0],
-            "labels": label_encoding["input_ids"][0]
+            "labels": label_encoding["input_ids"][0],
         }
         
         return encoding
 
 
 # Create dataset and dataloader
-train_dataset = MaskingDataset(examples, tokenizer)
+train_dataset = MaskingDataset(training_data, tokenizer)
 train_dataloader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-num_examples = len(train_dataset)
-print(f"Created dataset with {num_examples} examples")
+num_training_data = len(train_dataset)
+print(f"Created dataset with {num_training_data} lines of training data")
 
 # Initialize optimizer and scheduler
 from torch.optim import AdamW
@@ -207,11 +229,26 @@ def log_example_predictions(epoch):
     
     model.train()
 
+
+
+
+
 # Training loop
 progress_bar = tqdm(range(num_training_steps))
 step_counter = 0
 
-model.train()
+
+# Run example predictions and log to TensorBoard
+log_example_predictions(0)
+
+# Add model parameter histograms to TensorBoard
+for name, param in model.named_parameters():
+    if param.requires_grad:
+        writer.add_histogram(f"Parameters/{name}", param.data, 0)
+
+# Log learning rate
+writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], 0)
+
 
 for epoch in range(num_epochs):
     epoch_loss = 0.0
@@ -222,7 +259,7 @@ for epoch in range(num_epochs):
         # Forward pass
         outputs = model(**batch)
         loss = outputs.loss
-        
+
         # Backward pass
         loss.backward()
         optimizer.step()
@@ -258,11 +295,14 @@ for epoch in range(num_epochs):
 # Close TensorBoard writer
 writer.close()
 
+
 # Save the model
 print("Saving model...")
 model.save_pretrained("trained_model")
 tokenizer.save_pretrained("trained_model")
 print("Model saved!")
+
+
 
 # Evaluate model on test examples
 print("\n=== Testing the model on example inputs ===")

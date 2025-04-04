@@ -16,7 +16,8 @@ tokenizer = Tokenizer()
 tokens = tokenizer(example_input, return_tensors="pt")
 
 # Print the tokens
-print(tokens)
+# print(tokens)
+print(tokens["input_ids"])
 
 # Decode the tokens
 for i in range(len(tokens["input_ids"][0])):

@@ -268,6 +268,11 @@ class Tokenizer(BertTokenizer):
             do_lower_case=False,
             do_basic_tokenize=True,
             never_split=Tokenizer.RISC_V_VOCABS,
+            unk_token="[UNK]",
+            sep_token="[SEP]",
+            pad_token="[PAD]",
+            cls_token="[CLS]",
+            mask_token="[MASK]",
             tokenize_chinese_chars=False,
         )
         pass
@@ -290,10 +295,11 @@ class Tokenizer(BertTokenizer):
 
         num_lines = len(vocab_content)
 
-        total_tokens = 30523
+        # total_tokens = 30523
+        self.total_tokens = num_lines
 
         # Calculate how many unused tokens to add
-        unused_lines = total_tokens - num_lines
+        unused_lines = self.total_tokens - num_lines
         print(f"Current vocabulary has {num_lines} tokens. Adding {unused_lines} unused tokens.")
 
         for i in range(unused_lines):
@@ -304,4 +310,8 @@ class Tokenizer(BertTokenizer):
             for token in vocab_content:
                 f.write(f"{token}\n")
         
-        print(f"Updated vocabulary file now has {total_tokens} tokens.")
+        print(f"Updated vocabulary file now has {self.total_tokens} tokens.")
+    
+    @property
+    def num_tokens(self) -> int:
+        return self.total_tokens
