@@ -19,44 +19,41 @@ model.eval()
 
 print(f"Loaded model from {model_path}")
 
+
 def predict_masked_token(model, tokenizer, text):
-    """Predict the masked tokens in the input text"""
-    # Encode the input
+    # encode the input
     encoded_input = tokenizer(text)
     encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
     
-    # Find mask token positions
+    # find mask token positions
     mask_positions = (encoded_input["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)
     
     if mask_positions[0].shape[0] == 0:
-        print("No mask token found in the input!")
-        return None
-
-    # Generate predictions
+        raise Exception("No mask token found in the input!")
+    
+    # generate predictions
     with torch.no_grad():
         outputs = model(**encoded_input)
     
-    # Get predictions for all mask positions
-    results = []
-    for batch_idx, pos in zip(mask_positions[0], mask_positions[1]):
-        # Get top 5 predictions
-        logits = outputs.logits[batch_idx, pos, :]
-        top_5_tokens = torch.topk(logits, 5, dim=0)
-        top_token_ids = top_5_tokens.indices.tolist()
-        top_token_probs = torch.softmax(top_5_tokens.values, dim=0).tolist()
-        
-        # Convert token IDs to words
-        top_tokens = [tokenizer.decode([token_id]) for token_id in top_token_ids]
-        
-        results.append({
-            "position": pos.item(),
-            "top_predictions": [
-                {"token": token, "probability": prob} 
-                for token, prob in zip(top_tokens, top_token_probs)
-            ]
-        })
     
-    return results
+    # get top 5 predictions
+    logits = outputs.logits[mask_positions[0], mask_positions[1]][0]
+    top_5_tokens = torch.topk(logits, 5, dim=0)
+    top_token_ids = top_5_tokens.indices.tolist()
+    top_token_probs = torch.softmax(top_5_tokens.values, dim=0).tolist()
+        
+    # Convert token IDs to words
+    top_tokens = [tokenizer.decode([token_id]) for token_id in top_token_ids]
+
+    result = {
+        "position": mask_positions[0].item(),
+        "top_predictions": [
+            {"token": token, "probability": prob} 
+            for token, prob in zip(top_tokens, top_token_probs)
+        ]
+    }
+    
+    return result
 
 # Define test examples
 test_examples = [
@@ -74,33 +71,8 @@ for i, example in enumerate(test_examples):
     predictions = predict_masked_token(model, tokenizer, example)
     
     if predictions:
-        for p in predictions:
-            print(f"Position {p['position']}:")
-            for pred in p["top_predictions"]:
-                print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
+        print(f"Position {predictions['position']}:")
+        for pred in predictions["top_predictions"]:
+            print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
     else:
         print("No predictions generated.")
-
-# Function to test with custom input
-def test_custom_input():
-    while True:
-        user_input = input("\nEnter a masked sentence to predict (or 'q' to quit): ")
-        if user_input.lower() == 'q':
-            break
-            
-        if "[MASK]" not in user_input:
-            print("Input must contain [MASK] token.")
-            continue
-            
-        predictions = predict_masked_token(model, tokenizer, user_input)
-        
-        if predictions:
-            for p in predictions:
-                print(f"Position {p['position']}:")
-                for pred in p["top_predictions"]:
-                    print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
-        else:
-            print("No predictions generated.")
-
-# Uncomment the line below to enable interactive testing
-# test_custom_input()
