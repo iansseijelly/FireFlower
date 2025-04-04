@@ -260,11 +260,17 @@ class Tokenizer(BertTokenizer):
         "c.fsw",
     ]
 
-    def __init__(self):
-        self._generate_vocab()
+    def __init__(self, vocab_file: str | None = None):
+        if vocab_file is None:
+            self._generate_vocab()
+            vocab_file = "vocab/riscv_vocab.txt"
+        else:
+            with open(vocab_file, "r") as f:
+                vocab_content = f.read().strip().split("\n")
+                self.total_tokens = len(vocab_content)
         
         super().__init__(
-            vocab_file="vocab/riscv_vocab.txt",
+            vocab_file=vocab_file,
             do_lower_case=False,
             do_basic_tokenize=True,
             never_split=Tokenizer.RISC_V_VOCABS,
