@@ -268,6 +268,7 @@ class Tokenizer(BertTokenizer):
             do_lower_case=False,
             do_basic_tokenize=True,
             never_split=Tokenizer.RISC_V_VOCABS,
+            tokenize_chinese_chars=False,
         )
         pass
 
