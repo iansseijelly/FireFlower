@@ -20,14 +20,18 @@ tokenizer = Tokenizer()
 
 # Create custom config with actual vocab size
 config = BertConfig(
-    vocab_size=tokenizer.num_tokens,  # e.g., 1000 or whatever you need
-    hidden_size=768,
-    num_hidden_layers=12,
-    num_attention_heads=12,
-    intermediate_size=3072
+    vocab_size=tokenizer.num_tokens,
+    hidden_size=512,
+    num_hidden_layers=8,
+    num_attention_heads=8,
+    intermediate_size=2048
 )
 
 model = BertForMaskedLM(config)
+
+
+num_epochs = 40
+
 
 
 # Set seed for reproducibility
@@ -138,7 +142,6 @@ optimizer = AdamW(model.parameters(), lr=5e-5)
 
 from transformers import get_scheduler
 
-num_epochs = 4
 num_training_steps = num_epochs * len(train_dataloader)
 lr_scheduler = get_scheduler(
     name="linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps

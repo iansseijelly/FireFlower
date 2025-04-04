@@ -61,8 +61,8 @@ def predict_masked_token(model, tokenizer, text):
 # Define test examples
 test_examples = [
     "x0 x0 [MASK] x0 x0 x0 x0 x0 x0 x0 x0 x0 x0 x0 x0",
-    "START INST [MASK] RD x2 RS1 x0 IMM 10 TIMESTAMP 0 END",
-    "START INST sw RS1 x8 RS2 [MASK] IMM 0 TIMESTAMP 0 END",
+    "START INST addi [MASK] x3 RS1 x0 IMM 0 TIMESTAMP 0 END",
+    "START INST sw RS1 x8 RS2 x4 IMM 0 TIMESTAMP [MASK] END",
     # Add more examples here as needed
 ]
 
