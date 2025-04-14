@@ -12,8 +12,8 @@ START INST addi RD x11 RS1 x11 IMM -636 TIMESTAMP 1 END
 import re
 import sys
 import subprocess
-# capture only 2 groups C0: [cycle] and ... inst=[...]
-pattern = re.compile(r"C0:\s+(\d+)\s+.*inst=\[([0-9a-fA-F]+)\]")
+# capture only 3 groups C0: [cycle] pc=[...] and ... inst=[...]
+pattern = re.compile(r"C0:\s+(\d+)\s+.*pc=\[([0-9a-fA-F]+)\].*inst=\[([0-9a-fA-F]+)\]")
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
@@ -31,7 +31,8 @@ if __name__ == "__main__":
         match = pattern.match(line)
         if match:
             timestamp = match.group(1)
-            inst = match.group(2)
+            pc = match.group(2)[-8:]
+            inst = match.group(3)
 
             curr_timestamp = int(timestamp) - prev_timestamp
             prev_timestamp = int(timestamp)
@@ -40,5 +41,5 @@ if __name__ == "__main__":
             output = subprocess.run(["./dasm_one", "--input", inst, "--canonical"], capture_output=True, text=True)
             # get the output
             canonical_inst = output.stdout.split("\n")[0]
-            print(f"START INST {canonical_inst} TIMESTAMP {curr_timestamp} END")
+            print(f"START PC {pc} INST {canonical_inst} TIMESTAMP {curr_timestamp} END")
 
