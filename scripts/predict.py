@@ -145,10 +145,11 @@ def format_results(results):
         output.append(f"Total Actual Time: {block['total_actual']:.4f}")
         output.append(f"Difference: {block['total_predicted'] - block['total_actual']:.4f}\n")
         
+        output.append(f"Target BB time: {block['total_actual']:.4f}")
         # Table header
         output.append(f"{'Position':<8} {'Opcode':<15} {'Predicted':<12} {'Actual':<12} {'Instruction'}")
         output.append("-" * 80)
-        
+        # target bbtime
         # Table rows
         for instr in block["instructions"]:
             actual = f"{instr['actual_latency']:.4f}" if instr['actual_latency'] is not None else "N/A"
