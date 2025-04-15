@@ -1,326 +1,222 @@
 import os
-import random
-from datetime import datetime
-
-import numpy as np
-from tqdm.auto import tqdm
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from transformers import BertForMaskedLM, BertConfig
-from torch.utils.data import DataLoader, Dataset
-from torch.optim import AdamW
-from transformers import get_scheduler
-from tacit_learn.tokenizer import Tokenizer
+from math import sqrt
+# Import your dataset and model.
+# Adjust the import paths if necessary.
+from tacit_learn.dataloader import BasicBlockDataset, collate_fn
+from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
+
+# =====================
+#   Hyperparameters
+# =====================
+DATA_FILE = "data/rocket-hello.canonicalized.out"  # Your dataset file path.
+VOCAB_FILE = "vocab/opcodes.txt"
+BATCH_SIZE = 4
+NUM_EPOCHS = 20
+LEARNING_RATE = 1e-4
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+LOG_DIR = "./runs/basic_block_training"
+
+# Weight for the block-level sum constraint.
+BB_LOSS_WEIGHT = 0.01
 
 
-
-# training_data = "./data/dummy.txt"
-training_data = "./data/rocket-hello.canonicalized.out"
-
-# Initialize tokenizer and model
-tokenizer = Tokenizer(vocab_file="./vocab/riscv_vocab.txt")
-
-# Create custom config with actual vocab size
-config = BertConfig(
-    vocab_size=tokenizer.num_tokens,
-    hidden_size=256,
-    num_hidden_layers=8,
-    num_attention_heads=8,
-    intermediate_size=1024
-)
-
-model = BertForMaskedLM(config)
+# =====================
+#   Dataset & DataLoader
+# =====================
+train_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_path=DATA_FILE)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 
 
-num_epochs = 40
+# =====================
+#   Instantiate the Model
+# =====================
+# Adjust the vocabulary sizes as needed.
+NUM_INST = train_dataset.get_n_inst()
+NUM_REGS = train_dataset.get_n_reg()
+MAX_BLOCK_LEN = 64
+config = FireFlowerConfig(n_inst=NUM_INST, 
+                          n_reg=NUM_REGS,
+                          d_inst=int(sqrt(NUM_INST)),
+                          d_reg=int(sqrt(NUM_REGS)),
+                          d_imm=int(sqrt(NUM_INST)),
+                          d_bb=int(sqrt(NUM_INST)),
+                          d_model=128,
+                          n_head=4,
+                          n_layers=2,
+                          n_pos=MAX_BLOCK_LEN,
+                          d_pos=int(sqrt(NUM_REGS)))
+
+model = FireFlowerPredictor(config)
+model.to(DEVICE)
 
 
+# =====================
+#   Loss & Optimizer
+# =====================
+mse_loss = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+max_grad_norm = 1.0
 
-# Set seed for reproducibility
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+# =====================
+#   TensorBoard Setup
+# =====================
+writer = SummaryWriter(LOG_DIR)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-# Create TensorBoard writer
-log_dir = os.path.join("logs", datetime.now().strftime("%Y%m%d-%H%M%S"))
-writer = SummaryWriter(log_dir)
-print(f"TensorBoard logs will be saved to {log_dir}")
-
-# Load training data
-print(f"Loading training data from {training_data}")
-with open(training_data, "r") as f:
-    training_data = f.read().strip().split("ENDBB")[:-1]
-
-print(f"Loaded {len(training_data)} lines of training data")
-
-# tokenize training data
-training_inputs = tokenizer(training_data, max_length=200)
-
-# create a clone of the input ids as ground truth labels
-training_inputs["labels"] = training_inputs["input_ids"].detach().clone()
-
-# choose one position to mask (excluding special markers like SEP, CLS, PAD)
-for i in range(training_inputs["input_ids"].shape[0]):
-    maskable_positions = [j for j, token in enumerate(training_inputs["input_ids"][i])
-                          if token not in [tokenizer.sep_token_id, tokenizer.cls_token_id, tokenizer.pad_token_id]]
-    if not maskable_positions:
-        raise Exception("No maskable positions found")
-    
-    mask_position = random.choice(maskable_positions)
-
-    # print the maskable positions
-    print(f"Maskable positions: {maskable_positions}")
-    print(f"Mask position: {mask_position}")
-    print(f"Masked token: {tokenizer.decode(training_inputs['input_ids'][i, mask_position])}")
-    print(f"data before masking: {training_data[i]}")
-    # breakpoint()
-
-    training_inputs["input_ids"][i, mask_position] = tokenizer.mask_token_id
-
-
-# make masks after every TIMESTAMP token
-# for i in range(training_inputs["input_ids"].shape[0]):
-#     for j in range(training_inputs["input_ids"].shape[1]):
-#         if tokenizer.decode(training_inputs["input_ids"][i, j]) == "TIMESTAMP":
-#             training_inputs["input_ids"][i, j + 1] = tokenizer.mask_token_id
-
-
-class TraceDataset(Dataset):
-    def __init__(self, training_inputs):
-        assert training_inputs["input_ids"].dim() == 2
-        assert training_inputs["input_ids"].shape == training_inputs["labels"].shape
-        assert training_inputs["input_ids"].shape == training_inputs["attention_mask"].shape
-        assert training_inputs["input_ids"].shape == training_inputs["token_type_ids"].shape
-        
-        self.training_inputs = training_inputs
-
-    def __len__(self) -> int:
-        return self.training_inputs["input_ids"].shape[0]
-
-    def __getitem__(self, index) -> dict:
-        input_ids = self.training_inputs["input_ids"][index]
-        attention_mask = self.training_inputs["attention_mask"][index]
-        token_type_ids = self.training_inputs["token_type_ids"][index]
-        labels = self.training_inputs["labels"][index]
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
-            "labels": labels,
-        }
-
-
-# create dataset and dataloader
-train_dataset = TraceDataset(training_inputs)
-train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-
-num_training_data = len(train_dataset)
-print(f"Created dataset with {num_training_data} lines of training data")
-
-# Initialize optimizer and scheduler
-
-
-optimizer = AdamW(model.parameters(), lr=1e-4)
-
-num_training_steps = num_epochs * len(train_dataloader)
-lr_scheduler = get_scheduler(
-    name="linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
-)
-
-# ensure model is on the right device
-model.to(device)
-
-# define example inputs for tracking progress throughout training
-example_inputs = [
-    "x0 x0 [MASK] x0 x0 x0 x0 x0 x0 x0 x0 x0 x0 x0 x0",
-    "START INST addi [MASK] x3 RS1 x0 IMM 0 TIMESTAMP 0 END",
-    "START INST sw RS1 x8 RS2 x4 IMM 0 TIMESTAMP [MASK] END",
-]
-
-def predict_masked_token(model, tokenizer, text):
-    # encode the input
-    encoded_input = tokenizer(text)
-    encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
-    
-    # find mask token positions
-    mask_positions = (encoded_input["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)
-    
-    if mask_positions[0].shape[0] == 0:
-        raise Exception("No mask token found in the input!")
-    
-    # generate predictions
-    with torch.no_grad():
-        outputs = model(**encoded_input)
-    
-    
-    # get top 5 predictions
-    logits = outputs.logits[mask_positions[0], mask_positions[1]][0]
-    top_5_tokens = torch.topk(logits, 5, dim=0)
-    top_token_ids = top_5_tokens.indices.tolist()
-    top_token_probs = torch.softmax(top_5_tokens.values, dim=0).tolist()
-        
-    # Convert token IDs to words
-    top_tokens = [tokenizer.decode([token_id]) for token_id in top_token_ids]
-
-    result = {
-        "position": mask_positions[0].item(),
-        "top_predictions": [
-            {"token": token, "probability": prob} 
-            for token, prob in zip(top_tokens, top_token_probs)
-        ]
-    }
-    
-    return result
-
-def log_example_predictions(epoch):
-    """Run example predictions and log to TensorBoard"""
-    model.eval()
-    
-    # Log example predictions during training
-    for idx, example in enumerate(example_inputs):
-        prediction = predict_masked_token(model, tokenizer, example)
-        
-        # Log the top prediction for each mask
-        if prediction["top_predictions"]:
-            top_pred = prediction["top_predictions"][0]
-            writer.add_text(
-                f"Example {idx+1}/Position {prediction['position']}", 
-                f"Epoch {epoch}: '{top_pred['token']}' (p={top_pred['probability']:.4f})",
-                epoch
-            )
-            
-            # Also add a scalar for the top prediction confidence
-            writer.add_scalar(
-                f"Confidence/Example_{idx+1}_Pos_{prediction['position']}", 
-                top_pred['probability'],
-                epoch
-            )
-            
-            # Log top 5 predictions as histogram
-            probs = [pred["probability"] for pred in prediction["top_predictions"]]
-            writer.add_histogram(
-                f"Top5Probs/Example_{idx+1}_Pos_{prediction['position']}", 
-                torch.tensor(probs), 
-                epoch
-            )
-
-    model.train()
-
-
-
-
-
-# Training loop
-progress_bar = tqdm(range(num_training_steps))
-step_counter = 0
-
-# Run example predictions and log to TensorBoard
-log_example_predictions(0)
-
-# Add model parameter histograms to TensorBoard
-for name, param in model.named_parameters():
-    if param.requires_grad:
-        writer.add_histogram(f"Parameters/{name}", param.data, 0)
-
-# Log learning rate
-writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], 0)
-
-for epoch in range(num_epochs):
-    epoch_loss = 0.0
-    for batch in train_dataloader:
-        # Move batch to device
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        token_type_ids = batch["token_type_ids"].to(device)
-        labels = batch["labels"].to(device)
-        
-        # Forward pass
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels
-        )
-
-        loss = outputs.loss
-
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-        lr_scheduler.step()
-        optimizer.zero_grad()
-        
-        # Update progress and report
-        progress_bar.update(1)
-        step_counter += 1
-        epoch_loss += loss.item()
-        
-        # Log to TensorBoard
-        writer.add_scalar('Loss/train_step', loss.item(), step_counter)
-        
-        print(f"Step {step_counter}, Loss: {loss.item():.4f}")
-    
-    # Calculate and report epoch statistics
-    avg_epoch_loss = epoch_loss / len(train_dataloader)
-    writer.add_scalar('Loss/train_epoch', avg_epoch_loss, epoch)
-    print(f"\nEpoch {epoch+1}/{num_epochs} completed. Average Loss: {avg_epoch_loss:.4f}")
-    
-    # Run example predictions and log to TensorBoard
-    log_example_predictions(epoch)
-    
-    # Add model parameter histograms to TensorBoard
+# Function to log model parameter statistics
+def log_model_stats(model, step):
     for name, param in model.named_parameters():
         if param.requires_grad:
-            writer.add_histogram(f"Parameters/{name}", param.data, epoch)
+            writer.add_histogram(f"parameters/{name}", param.data, step)
+            if param.grad is not None:
+                writer.add_histogram(f"gradients/{name}", param.grad.data, step)
+            writer.add_scalar(f"parameter_norm/{name}", param.data.norm().item(), step)
+            if param.grad is not None:
+                writer.add_scalar(f"gradient_norm/{name}", param.grad.data.norm().item(), step)
+
+# =====================
+#   Training Loop
+# =====================
+global_step = 0
+
+for epoch in range(NUM_EPOCHS):
+    model.train()
+    running_loss = 0.0
+    # Log learning rate at start of epoch
+    writer.add_scalar("Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
+    
+    for batch_idx, batch in enumerate(train_loader):
+        # Move batch to device.
+        instructions = {k: v.to(DEVICE) for k, v in batch["instructions"].items()}
+        # print(f"Max inst_id: {instructions['inst_id'].max().item()}, vocab size: {config.n_inst}")
+        # print(f"Max position: {batch['positions'].max().item()}, max allowed: {config.n_pos - 1}")
+        positions = batch["positions"].to(DEVICE)
+        bbtime = batch["bbtime"].to(DEVICE)  # shape: [B, 1]
+        # Our target is the TIMESTAMP field per instruction.
+        target = batch["target"].to(DEVICE)   # shape: [B, L, 1]
+
+        optimizer.zero_grad()
+
+        # Forward pass.
+        preds = model(instructions, positions, bbtime)  # shape: [B, L, 1]
+
+        # Compute per-instruction regression loss.
+        reg_loss = mse_loss(preds, target)
+
+        # Compute block-level sum loss.
+        # Sum predictions over instructions (dim=1) and compare with bbtime.
+        # Note: our target for bbtime is a scalar per block.
+        pred_bbtime = preds.sum(dim=1)  # shape: [B, 1]
+        bb_loss = mse_loss(pred_bbtime, bbtime)
+
+        # After computing losses
+        if torch.isnan(reg_loss) or torch.isnan(bb_loss):
+            print(f"NaN detected! reg_loss: {reg_loss.item()}, bb_loss: {bb_loss.item()}")
+            print(f"preds min/max: {preds.min().item()}/{preds.max().item()}")
+            print(f"target min/max: {target.min().item()}/{target.max().item()}")
+            print(f"bbtime min/max: {bbtime.min().item()}/{bbtime.max().item()}")
+            # Optional: skip this batch
+            breakpoint()
+
+        loss = reg_loss + BB_LOSS_WEIGHT * bb_loss
+
+        # Backpropagation.
+        loss.backward()
+        
+        # Calculate gradient norm before clipping (for monitoring)
+        total_norm = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        writer.add_scalar("Gradient/TotalNormBeforeClip", total_norm, global_step)
+        
+        # Clip gradients to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
+        # Log gradient norm after clipping
+        total_norm_after = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm_after += param_norm.item() ** 2
+        total_norm_after = total_norm_after ** 0.5
+        writer.add_scalar("Gradient/TotalNormAfterClip", total_norm_after, global_step)
+        
+        optimizer.step()
+
+        running_loss += loss.item()
+        global_step += 1
+
+        # Log every few batches.
+        if batch_idx % 10 == 0:
+            avg_loss = running_loss / (batch_idx + 1)
+            print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Batch [{batch_idx}] Loss: {avg_loss:.4f}")
+            writer.add_scalar("Loss/Total", avg_loss, global_step)
+            writer.add_scalar("Loss/Regression", reg_loss.item(), global_step)
+            writer.add_scalar("Loss/BB_Sum", bb_loss.item(), global_step)
             
-    # Log learning rate
-    writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], epoch)
+            # Log prediction and target statistics
+            writer.add_scalar("Predictions/Min", preds.min().item(), global_step)
+            writer.add_scalar("Predictions/Max", preds.max().item(), global_step)
+            writer.add_scalar("Predictions/Mean", preds.mean().item(), global_step)
+            writer.add_scalar("Predictions/Std", preds.std().item(), global_step)
+            
+            writer.add_scalar("Targets/Min", target.min().item(), global_step)
+            writer.add_scalar("Targets/Max", target.max().item(), global_step)
+            writer.add_scalar("Targets/Mean", target.mean().item(), global_step)
+            writer.add_scalar("Targets/Std", target.std().item(), global_step)
+            
+            writer.add_scalar("BBTime/Min", bbtime.min().item(), global_step)
+            writer.add_scalar("BBTime/Max", bbtime.max().item(), global_step)
+            writer.add_scalar("BBTime/Mean", bbtime.mean().item(), global_step)
+            
+            # Log prediction sum vs actual bbtime
+            writer.add_scalar("BBTime/PredictionSum", pred_bbtime.mean().item(), global_step)
+            writer.add_scalar("BBTime/Actual", bbtime.mean().item(), global_step)
+            writer.add_scalar("BBTime/Diff", (pred_bbtime - bbtime).abs().mean().item(), global_step)
+            
+            # Log model parameter statistics every few batches
+            if batch_idx % 50 == 0:
+                log_model_stats(model, global_step)
 
-# Close TensorBoard writer
+    # End-of-epoch logging.
+    epoch_loss = running_loss / len(train_loader)
+    print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Average Loss: {epoch_loss:.4f}")
+    writer.add_scalar("Loss/Epoch", epoch_loss, epoch)
+    
+    # Log full model statistics at the end of each epoch
+    log_model_stats(model, global_step)
+    
+    # Add sample predictions visualization (optional)
+    if epoch % 5 == 0 or epoch == NUM_EPOCHS - 1:
+        # Get a sample batch for visualization
+        sample_batch = next(iter(train_loader))
+        sample_instructions = {k: v.to(DEVICE) for k, v in sample_batch["instructions"].items()}
+        sample_positions = sample_batch["positions"].to(DEVICE)
+        sample_bbtime = sample_batch["bbtime"].to(DEVICE)
+        sample_target = sample_batch["target"].to(DEVICE)
+        
+        with torch.no_grad():
+            sample_preds = model(sample_instructions, sample_positions, sample_bbtime)
+        
+        # Create text representation for visualization
+        for b in range(min(2, sample_preds.size(0))):  # Just show first 2 examples
+            sample_text = ""
+            for i in range(sample_preds.size(1)):
+                if sample_instructions["inst_id"][b, i] == 0:  # Assuming 0 is padding
+                    continue
+                sample_text += f"Instr {i}: Pred={sample_preds[b, i, 0].item():.4f}, Target={sample_target[b, i, 0].item():.4f}\n"
+            writer.add_text(f"Predictions_Example_{b}", sample_text, epoch)
+
+# Save the final model.
+os.makedirs("checkpoints", exist_ok=True)
+torch.save(model.state_dict(), "checkpoints/model_final.pth")
+
 writer.close()
-
-
-# Save the model
-print("Saving model...")
-model.save_pretrained("trained_model")
-tokenizer.save_pretrained("trained_model")
-print("Model saved!")
-
-
-
-# Evaluate model on test examples
-print("\n=== Testing the model on example inputs ===")
-
-# Example 1: Predict instruction operand
-example1 = '''START PC 800001bc INST sd RS1 x5 RS2 x0 IMM 0 TIMESTAMP [MASK] END
-START PC 800001c0 INST addi RD x5 RS1 x5 IMM 8 TIMESTAMP 1 END
-START PC 800001c4 INST bltu RS1 x5 RS2 x6 IMM -8 TIMESTAMP 1 END
-BBTIME 3'''
-print(f"\nExample 1: {example1}")
-predictions = predict_masked_token(model, tokenizer, example1)
-print(f"Position {predictions['position']}:")
-for pred in predictions["top_predictions"]:
-    print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
-
-# Example 2: Predict instruction type
-# Example 1: Predict instruction operand
-example2 = '''START PC 800001bc INST sd RS1 x5 RS2 x0 IMM 0 TIMESTAMP 1 END
-START PC 800001c0 INST addi RD x5 RS1 x5 IMM 8 TIMESTAMP [MASK] END
-START PC 800001c4 INST bltu RS1 x5 RS2 x6 IMM -8 TIMESTAMP 1 END
-BBTIME 45'''
-print(f"\nExample 2: {example2}")
-predictions = predict_masked_token(model, tokenizer, example2)
-print(f"Position {predictions['position']}:")
-for pred in predictions["top_predictions"]:
-    print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
-
-# Example 3: Predict something simple
-example3 = "START PC 800001c0 INST [MASK] RD x5 RS1 x5 IMM 8 TIMESTAMP 43 END"
-print(f"\nExample 3: {example3}")
-predictions = predict_masked_token(model, tokenizer, example3)
-print(f"Position {predictions['position']}:")
-for pred in predictions["top_predictions"]:
-    print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
+print("Training complete.")
