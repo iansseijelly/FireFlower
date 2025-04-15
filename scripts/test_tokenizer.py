@@ -1,11 +1,11 @@
 from tacit_learn.tokenizer import Tokenizer
 
 
-with open("./data/baremetal_startup.txt", "r") as f:
+with open("./data/rocket-hello.canonicalized.out", "r") as f:
     example_input = f.read()
 
 
-example_input = example_input[:100]
+example_input = example_input[:1500]
 
 # print(example_input)
 
@@ -13,7 +13,7 @@ example_input = example_input[:100]
 tokenizer = Tokenizer()
 
 # Tokenize the input
-tokens = tokenizer(example_input, return_tensors="pt")
+tokens = tokenizer(example_input, return_tensors="pt", max_length=200)
 
 # Print the tokens
 # print(tokens)
@@ -23,5 +23,4 @@ print(tokens["input_ids"])
 for i in range(len(tokens["input_ids"][0])):
     token = tokenizer.decode(tokens["input_ids"][0][i])
     print(token, end=" ")
-    if token == "END":
-        print()
+

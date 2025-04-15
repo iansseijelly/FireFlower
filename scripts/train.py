@@ -15,7 +15,7 @@ from tacit_learn.tokenizer import Tokenizer
 
 
 # training_data = "./data/dummy.txt"
-training_data = "./data/baremetal_startup.txt"
+training_data = "./data/rocket-hello.canonicalized.out"
 
 # Initialize tokenizer and model
 tokenizer = Tokenizer(vocab_file="./vocab/riscv_vocab.txt")
@@ -52,12 +52,12 @@ print(f"TensorBoard logs will be saved to {log_dir}")
 # Load training data
 print(f"Loading training data from {training_data}")
 with open(training_data, "r") as f:
-    training_data = f.read().strip().split("\n")
+    training_data = f.read().strip().split("ENDBB")[:-1]
 
 print(f"Loaded {len(training_data)} lines of training data")
 
 # tokenize training data
-training_inputs = tokenizer(training_data)
+training_inputs = tokenizer(training_data, max_length=200)
 
 # create a clone of the input ids as ground truth labels
 training_inputs["labels"] = training_inputs["input_ids"].detach().clone()
@@ -70,7 +70,22 @@ for i in range(training_inputs["input_ids"].shape[0]):
         raise Exception("No maskable positions found")
     
     mask_position = random.choice(maskable_positions)
+
+    # print the maskable positions
+    print(f"Maskable positions: {maskable_positions}")
+    print(f"Mask position: {mask_position}")
+    print(f"Masked token: {tokenizer.decode(training_inputs['input_ids'][i, mask_position])}")
+    print(f"data before masking: {training_data[i]}")
+    # breakpoint()
+
     training_inputs["input_ids"][i, mask_position] = tokenizer.mask_token_id
+
+
+# make masks after every TIMESTAMP token
+# for i in range(training_inputs["input_ids"].shape[0]):
+#     for j in range(training_inputs["input_ids"].shape[1]):
+#         if tokenizer.decode(training_inputs["input_ids"][i, j]) == "TIMESTAMP":
+#             training_inputs["input_ids"][i, j + 1] = tokenizer.mask_token_id
 
 
 class TraceDataset(Dataset):
@@ -280,7 +295,10 @@ print("Model saved!")
 print("\n=== Testing the model on example inputs ===")
 
 # Example 1: Predict instruction operand
-example1 = "START INST addi RD x1 RS1 [MASK] IMM 0 TIMESTAMP 0 END"
+example1 = '''START PC 800001bc INST sd RS1 x5 RS2 x0 IMM 0 TIMESTAMP [MASK] END
+START PC 800001c0 INST addi RD x5 RS1 x5 IMM 8 TIMESTAMP 1 END
+START PC 800001c4 INST bltu RS1 x5 RS2 x6 IMM -8 TIMESTAMP 1 END
+BBTIME 3'''
 print(f"\nExample 1: {example1}")
 predictions = predict_masked_token(model, tokenizer, example1)
 print(f"Position {predictions['position']}:")
@@ -288,15 +306,19 @@ for pred in predictions["top_predictions"]:
     print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
 
 # Example 2: Predict instruction type
-example2 = "START INST [MASK] RD x2 RS1 x0 IMM 10 TIMESTAMP 0 END"
+# Example 1: Predict instruction operand
+example2 = '''START PC 800001bc INST sd RS1 x5 RS2 x0 IMM 0 TIMESTAMP 1 END
+START PC 800001c0 INST addi RD x5 RS1 x5 IMM 8 TIMESTAMP [MASK] END
+START PC 800001c4 INST bltu RS1 x5 RS2 x6 IMM -8 TIMESTAMP 1 END
+BBTIME 45'''
 print(f"\nExample 2: {example2}")
 predictions = predict_masked_token(model, tokenizer, example2)
 print(f"Position {predictions['position']}:")
 for pred in predictions["top_predictions"]:
     print(f"  {pred['token']} (prob: {pred['probability']:.4f})")
 
-# Example 3: Predict register
-example3 = "START INST sw RS1 x8 RS2 [MASK] IMM 0 TIMESTAMP 0 END"
+# Example 3: Predict something simple
+example3 = "START PC 800001c0 INST [MASK] RD x5 RS1 x5 IMM 8 TIMESTAMP 43 END"
 print(f"\nExample 3: {example3}")
 predictions = predict_masked_token(model, tokenizer, example3)
 print(f"Position {predictions['position']}:")
