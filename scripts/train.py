@@ -1,10 +1,13 @@
 import os
+import datetime
+from math import sqrt
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from math import sqrt
+
 # Import your dataset and model.
 # Adjust the import paths if necessary.
 from tacit_learn.dataloader import BasicBlockDataset, collate_fn
@@ -16,13 +19,13 @@ from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
 DATA_FILE = "data/rocket-hello.canonicalized.out"  # Your dataset file path.
 VOCAB_FILE = "vocab/opcodes.txt"
 BATCH_SIZE = 4
-NUM_EPOCHS = 20
+NUM_EPOCHS = 40
 LEARNING_RATE = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-LOG_DIR = "./runs/basic_block_training"
+LOG_DIR = "./logs/ff_training_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Weight for the block-level sum constraint.
-BB_LOSS_WEIGHT = 0.01
+BB_LOSS_WEIGHT = 0.1
 
 
 # =====================
@@ -59,7 +62,7 @@ model.to(DEVICE)
 #   Loss & Optimizer
 # =====================
 mse_loss = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 max_grad_norm = 1.0
 
 # =====================
