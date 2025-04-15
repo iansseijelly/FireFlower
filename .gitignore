@@ -181,3 +181,6 @@ cache/
 # Training data
 logs/
 trained_model/
+checkpoints/
+runs/
+
