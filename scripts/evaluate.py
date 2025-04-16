@@ -173,9 +173,51 @@ def plot_relative_error(predictions, targets, level="instruction"):
 # =====================
 #   Run Evaluation
 # =====================
+
+def format_results(results):
+    """Format the prediction results in a human-readable way."""
+    output = []
+    
+    for block in results:
+        output.append(f"\n===== Basic Block {block['block_idx']} =====")
+        output.append(f"Total Predicted Time: {block['total_predicted']:.4f}")
+        output.append(f"Total Actual Time: {block['total_actual']:.4f}")
+        output.append(f"Difference: {block['total_predicted'] - block['total_actual']:.4f}")
+        output.append(f"Relative Error: {abs(block['total_predicted'] - block['total_actual']) / (block['total_actual'] + 1e-8):.4f}\n")
+        
+        # Table header
+        output.append(f"{'Position':<8} {'Opcode':<15} {'Predicted':<12} {'Actual':<12} {'Diff':<10} {'Rel Error':<10} {'Instruction'}")
+        output.append("-" * 100)
+        
+        # Table rows
+        for instr in block["instructions"]:
+            actual = instr['actual_latency']
+            predicted = instr['predicted_latency']
+            
+            if actual is not None:
+                diff = predicted - actual
+                rel_error = abs(diff) / (actual + 1e-8)
+                actual_str = f"{actual:.4f}"
+                diff_str = f"{diff:.4f}"
+                rel_error_str = f"{rel_error:.4f}"
+            else:
+                actual_str = "N/A"
+                diff_str = "N/A"
+                rel_error_str = "N/A"
+                
+            output.append(
+                f"{instr['position']:<8} {instr['opcode'][:15]:<15} {predicted:.4f}       "
+                f"{actual_str:<12} {diff_str:<10} {rel_error_str:<10} {instr['instruction']}"
+            )
+            
+        # Add separator between blocks
+        output.append("\n" + "=" * 100)
+    
+    return "\n".join(output)
+
 def run_evaluation():
     """Run evaluation with proper handling of variable sequence lengths."""
-    all_preds_flat = []
+    all_preds = []
     all_targets_flat = []
     all_bb_predictions = []
     all_bb_times = []
@@ -196,32 +238,61 @@ def run_evaluation():
             # Calculate basic block predictions (sum of instruction predictions)
             bb_preds = preds.sum(dim=1)
             
+            # Store prediction results for formatting
+            for i in range(preds.size(0)):  # Iterate through each sample in batch
+                block_data = {
+                    "block_idx": batch_idx * BATCH_SIZE + i,
+                    "total_predicted": bb_preds[i].item(),
+                    "total_actual": bbtime[i].item(),
+                    "instructions": []
+                }
+                
+                # Get instruction details
+                for j in range(preds.size(1)):  # Iterate through each instruction
+                    if j < target.size(1) and target[i, j, 0] != 0:  # Skip padding
+                        # Try to get instruction text if available
+                        instr_text = batch.get("instruction_text", [["Unknown"]])[i][j] if j < len(batch.get("instruction_text", [[]])[i]) else "Unknown"
+                        # Try to get opcode if available
+                        opcode = "Unknown"
+                        if "inst_id" in instructions:
+                            inst_id = instructions["inst_id"][i, j].item()
+                            if hasattr(test_dataset, "id2inst"):
+                                opcode = test_dataset.id2inst.get(inst_id, "Unknown")
+                        
+                        block_data["instructions"].append({
+                            "position": j,
+                            "opcode": opcode,
+                            "instruction": instr_text,
+                            "predicted_latency": preds[i, j, 0].item(),
+                            "actual_latency": target[i, j, 0].item()
+                        })
+                
+                all_preds.append(block_data)
+            
             # Immediately flatten and filter out padding before storing
             # This avoids the dimension mismatch when concatenating later
             batch_mask = target.reshape(-1) != 0  # Filter out padding (assumes 0 is padding)
             
-            # Collect flattened results
-            all_preds_flat.append(preds.reshape(-1)[batch_mask].cpu())
+            # Collect flattened results for metrics calculation
             all_targets_flat.append(target.reshape(-1)[batch_mask].cpu())
-            
-            # Basic block results don't have the sequence length dimension issue
             all_bb_predictions.append(bb_preds.cpu())
             all_bb_times.append(bbtime.cpu())
             
             if batch_idx % 10 == 0:
                 print(f"Processed {batch_idx+1}/{len(test_loader)} batches")
 
-            # save all predictions and targets in pretty text format
+    # save all predictions and targets in pretty text format
+    with open(os.path.join(RESULTS_DIR, 'predictions.txt'), 'w') as f:
+        f.write(format_results(all_preds))
     
-    # Concatenate all predictions and targets
-    all_preds_flat = torch.cat(all_preds_flat, dim=0)
+    # Concatenate all predictions and targets for metrics
     all_targets_flat = torch.cat(all_targets_flat, dim=0)
     all_bb_predictions = torch.cat(all_bb_predictions, dim=0)
     all_bb_times = torch.cat(all_bb_times, dim=0)
     
     # Convert to numpy for metric calculation
-    pred_instr = all_preds_flat.numpy()
-    target_instr = all_targets_flat.numpy()
+    pred_instr = torch.tensor([instr["predicted_latency"] for block in all_preds for instr in block["instructions"]]).numpy()
+    target_instr = torch.tensor([instr["actual_latency"] for block in all_preds for instr in block["instructions"]]).numpy()
     bb_preds = all_bb_predictions.reshape(-1).numpy()
     bb_targets = all_bb_times.reshape(-1).numpy()
     
