@@ -3,3 +3,4 @@ torch
 transformers[torch]
 accelerate
 tqdm
+tensorboard

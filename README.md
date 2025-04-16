@@ -1,4 +1,4 @@
-# TACIT-Learn
+# FireFlower
 
 ## Installation
 
@@ -11,4 +11,3 @@ conda activate tacit-learn
 pip install -r requirements.txt
 pip install -e .
 ```
-
