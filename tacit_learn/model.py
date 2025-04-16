@@ -22,6 +22,7 @@ class FireFlowerPredictor(nn.Module):
 
         self.config = config
         
+        # instruction embeddings
         self.inst_embeddings = nn.Embedding(config.n_inst, config.d_inst)
         self.reg_embeddings = nn.Embedding(config.n_reg, config.d_reg)
         self.imm_linear = nn.Linear(1, config.d_imm)
@@ -30,14 +31,15 @@ class FireFlowerPredictor(nn.Module):
         self.instruction_fusion = nn.Linear(d_in, config.d_model)
         
         self.bb_linear = nn.Linear(1, config.d_bb)
-        # Define fusion layer to combine instruction and basic block info
+        # define fusion layer to combine instruction and basic block info
         self.fusion = nn.Linear(config.d_model + config.d_bb, config.d_model)
         
+        # position embeddings
         self.pos_embeddings = nn.Embedding(config.n_pos, config.d_pos)
-        # Add a projection layer to match position embedding dimension to model dimension
+        # add a projection layer to match position embedding dimension to model dimension
         self.pos_projection = nn.Linear(config.d_pos, config.d_model)
         
-        # Add a layer normalization layer after the position embedding
+        # layer normalization layer to stabilize training
         self.pos_ln = nn.LayerNorm(config.d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=config.d_model, nhead=config.n_head, dropout=0.1)
@@ -61,37 +63,38 @@ class FireFlowerPredictor(nn.Module):
         Returns:
             preds (Tensor): FloatTensor of shape [B, L, 1] with predicted per-instruction latencies.
         """
+        # instruction embeddings
         inst_embeddings = self.inst_embeddings(instructions["inst_id"])
         rd_embeddings = self.reg_embeddings(instructions["rd_id"])
         rs1_embeddings = self.reg_embeddings(instructions["rs1_id"])
         rs2_embeddings = self.reg_embeddings(instructions["rs2_id"])
-        # Convert imm to float before passing to the linear layer
         imm_embeddings = self.imm_linear(instructions["imm"])
 
+        # concatenate all embeddings
         x = torch.cat([inst_embeddings, rs1_embeddings, rs2_embeddings, rd_embeddings, imm_embeddings], dim=-1)
         x = self.instruction_fusion(x)
 
-        # Expand BBTIME embedding for each instruction in the block.
+        # expand BBTIME embedding for each instruction in the block.
         bb_embeddings = self.bb_linear(bbtime)
         bb_emb_expanded = bb_embeddings.unsqueeze(1).expand(-1, x.size(1), -1)
         
-        # Concatenate the instruction representation with the BBTIME embedding.
+        # concatenate the instruction representation with the BBTIME embedding.
         x = torch.cat([x, bb_emb_expanded], dim=-1)  # [B, L, d_model + d_bb]
         x = self.fusion(x)  # [B, L, d_model]
 
-        # Add positional embedding to encode order in the basic block.
+        # add positional embedding to encode order in the basic block.
         pos_emb = self.pos_embeddings(positions)  # [B, L, d_pos]
         pos_emb = self.pos_projection(pos_emb)  # [B, L, d_model]
         x = x + pos_emb
 
-        # Apply batch normalization to the position embedding
+        # apply batch normalization to the position embedding
         x = self.pos_ln(x)
 
-        # Prepare Transformer: PyTorch's transformer expects input as (sequence_length, batch_size, d_model)
-        x = x.transpose(0, 1)  # Now shape is [L, B, d_model]
-        x = self.transformer(x)  # Output shape remains [L, B, d_model]
-        x = x.transpose(0, 1)    # Shape back to [B, L, d_model]
+        # prepare transformer: pytorch's transformer expects input as (sequence_length, batch_size, d_model)
+        x = x.transpose(0, 1)  # now shape is [L, B, d_model]
+        x = self.transformer(x)  # output shape remains [L, B, d_model]
+        x = x.transpose(0, 1)    # shape back to [B, L, d_model]
 
-        # Regression prediction: one scalar per instruction.
+        # regression prediction: one scalar per instruction.
         preds = self.regression_head(x)  # [B, L, 1]
         return preds

@@ -11,8 +11,8 @@ START INST addi RD x11 RS1 x11 IMM -636 TIMESTAMP 1 END
 
 # constants
 BRANCH_OPCODES = ["beq", "bge", "bgeu", "blt", "bltu", "bne", "beqz", "bnez",
-                                "bgez", "blez", "bltz", "bgtz", "bgt", "ble", "bgtu", "bleu",
-                                "c.beqz", "c.bnez", "c.bltz", "c.bgez"]
+                    "bgez", "blez", "bltz", "bgtz", "bgt", "ble", "bgtu", "bleu",
+                    "c.beqz", "c.bnez", "c.bltz", "c.bgez"]
 IJ_OPCODES = ["jal", "j", "call", "tail", "c.j", "c.jal"]
 UJ_OPCODES = ["jalr", "jr", "c.jr", "c.jalr", "ret"]
 
