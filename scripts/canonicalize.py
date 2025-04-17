@@ -20,48 +20,128 @@ import re
 import sys
 import subprocess
 import os
+import glob
+import tempfile
+import shutil
+
 # capture only 3 groups C0: [cycle] pc=[...] and ... inst=[...]
 pattern = re.compile(r"C0:\s+(\d+)\s+.*pc=\[([0-9a-fA-F]+)\].*inst=\[([0-9a-fA-F]+)\]")
 
-if __name__ == "__main__":
-
-    if len(sys.argv) != 2:
-        print("Usage: python canonicalize.py <input_file>")
-        sys.exit(1)
-
-    input_file = sys.argv[1]
-
+def generate_dasm_placeholders(input_file, temp_file):
+    """First pass: Generate file with DASM placeholders"""
     with open(input_file, "r") as f:
         lines = f.readlines()
     
-    prev_timestamp = 18 # magic number
-    prev_bb_timestamp = 18 # magic number
+    prev_timestamp = 18  # magic number
+    
+    with open(temp_file, "w") as out:
+        for line in lines:
+            match = pattern.match(line)
+            if match:
+                timestamp = match.group(1)
+                pc = match.group(2)[-8:]
+                inst = match.group(3)
 
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+                curr_timestamp = int(timestamp) - prev_timestamp
+                prev_timestamp = int(timestamp)
 
-    for line in lines:
-        match = pattern.match(line)
-        if match:
-            timestamp = match.group(1)
-            pc = match.group(2)[-8:]
-            inst = match.group(3)
+                # Create placeholder line
+                out.write(f"START PC {pc} INST DASM(0x{inst}) TIMESTAMP {curr_timestamp} END\n")
 
-            curr_timestamp = int(timestamp) - prev_timestamp
-            prev_timestamp = int(timestamp)
-
-            # call ./dasm on inst
-            output = subprocess.run(["./dasm_one", "--input", inst, "--canonical"], capture_output=True, text=True)
-            # get the output
-            canonical_inst = output.stdout.split("\n")[0]
-
-            # get the opcode for the canonicalized instruction
-            opcode = canonical_inst.split(" ")[0]
-
-            print(f"START PC {pc} INST {canonical_inst} TIMESTAMP {curr_timestamp} END")
+def process_canonicalized_file(input_path, output_path, max_bb_size):
+    """Third pass: Process the canonicalized file and add basic blocks"""
+    with open(input_path, "r") as f:
+        lines = f.readlines()
+    
+    prev_bb_timestamp = 0
+    current_bb = []
+    
+    with open(output_path, "w") as out:
+        for line in lines:
+            if not line.startswith("START"):
+                continue
             
-            # check if the opcode is a branch opcode, jump opcode, or return opcode
+            # Parse the instruction
+            parts = line.strip().split()
+            if len(parts) < 4:
+                continue  # Skip malformed lines
+                
+            # Find INST index and extract opcode
+            try:
+                inst_idx = parts.index("INST")
+                opcode = parts[inst_idx + 1] if inst_idx + 1 < len(parts) else ""
+                
+                # Find TIMESTAMP index and extract value
+                timestamp_idx = parts.index("TIMESTAMP")
+                timestamp = int(parts[timestamp_idx + 1]) if timestamp_idx + 1 < len(parts) else 0
+            except ValueError:
+                continue  # Skip lines missing required components
+            
+            # Add this instruction to the current basic block
+            current_bb.append(line)
+            
+            # Check if the opcode is a branch, jump, or return opcode
             if opcode in BRANCH_OPCODES or opcode in IJ_OPCODES or opcode in UJ_OPCODES:
-                # check if the timestamp is greater than the previous bb timestamp
-                curr_bb_timestamp = int(timestamp) - prev_bb_timestamp
-                prev_bb_timestamp = int(timestamp)
-                print(f"BBTIME {curr_bb_timestamp} ENDBB")
+                # Only output basic block if it's within size threshold
+                if len(current_bb) <= max_bb_size:
+                    for inst in current_bb:
+                        out.write(inst)
+                    out.write(f"BBTIME {timestamp} ENDBB\n")
+                
+                # Reset for the next basic block
+                current_bb = []
+                prev_bb_timestamp = timestamp
+        
+        # Handle the last basic block if there's anything left
+        if current_bb and len(current_bb) <= max_bb_size:
+            for inst in current_bb:
+                out.write(inst)
+            out.write("BBTIME 0 ENDBB\n")  # No timestamp for final BB
+
+if __name__ == "__main__":
+
+
+
+    # Set max basic block size threshold
+    MAX_BB_SIZE = 64  # Adjust this value as needed
+    
+    # Create output and temp directories
+    os.makedirs("data/canonicalized", exist_ok=True)
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # go to pwd
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        os.chdir(script_dir)
+
+        input_files = glob.glob("../data/orig/*")
+        
+        if not input_files:
+            print("No files found in data/orig directory.")
+            sys.exit(1)
+        
+        for input_file in input_files:
+            basename = os.path.basename(input_file)
+            print(f"Processing {basename}...")
+            
+            # First pass: Generate DASM placeholders
+            temp_file = os.path.join(temp_dir, f"{basename}.tmp")
+            generate_dasm_placeholders(input_file, temp_file)
+            print(f"DASM placeholders generated in {temp_file}")
+            
+            # Second pass: Run dasm_all to convert to canonical form
+            canonical_file = os.path.join(temp_dir, f"{basename}.canonical.out")
+            subprocess.run(["./dasm_all", "-i", temp_file, "-c", "-o", canonical_file], 
+                           check=True)
+            print(f"Canonicalized file generated in {canonical_file}")
+            
+            # Third pass: Process canonicalized file and add basic blocks
+            output_file = os.path.join("../data/canonicalized", f"{basename}.out")
+            process_canonicalized_file(canonical_file, output_file, MAX_BB_SIZE)
+            print(f"Basic blocks added to {output_file}")
+            
+        print(f"Processing complete. Output written to data/canonicalized/")
+    
+    finally:
+        # Clean up temp directory
+        shutil.rmtree(temp_dir)
