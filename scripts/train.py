@@ -1,7 +1,7 @@
 import os
 import datetime
 from math import sqrt
-
+import glob
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,10 +16,10 @@ from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
 # =====================
 #   Hyperparameters
 # =====================
-DATA_FILE = "data/rocket-hello.canonicalized.out"  # Your dataset file path.
+DATA_FOLDER = "data/canonicalized"  # Your dataset file path.
 VOCAB_FILE = "vocab/opcodes.txt"
-BATCH_SIZE = 4
-NUM_EPOCHS = 40
+BATCH_SIZE = 64
+NUM_EPOCHS = 10
 LEARNING_RATE = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOG_DIR = "./logs/ff_training_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -27,12 +27,20 @@ LOG_DIR = "./logs/ff_training_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%
 # Weight for the block-level sum constraint.
 BB_LOSS_WEIGHT = 0.1
 
+# Configuration
+max_checkpoints_to_keep = 5  # Adjust as needed
 
 # =====================
 #   Dataset & DataLoader
 # =====================
-train_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_path=DATA_FILE)
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
+training_files = glob.glob(os.path.join(DATA_FOLDER, "*.out"))
+train_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_paths=training_files)
+train_loader = DataLoader(train_dataset, 
+                        batch_size=BATCH_SIZE, 
+                        collate_fn=collate_fn, 
+                        shuffle=True,
+                        pin_memory=True,
+                        num_workers=4)
 
 
 # =====================
@@ -55,6 +63,12 @@ config = FireFlowerConfig(n_inst=NUM_INST,
                           d_pos=int(sqrt(NUM_REGS)))
 
 model = FireFlowerPredictor(config)
+
+if torch.__version__ >= "2.0.0":
+    model = torch.compile(model)
+else:
+    print("Warning: torch version is less than 2.0.0, model will not be compiled.")
+
 model.to(DEVICE)
 
 
@@ -216,6 +230,23 @@ for epoch in range(NUM_EPOCHS):
                     continue
                 sample_text += f"Instr {i}: Pred={sample_preds[b, i, 0].item():.4f}, Target={sample_target[b, i, 0].item():.4f}\n"
             writer.add_text(f"Predictions_Example_{b}", sample_text, epoch)
+
+    # Save model after every epoch
+    checkpoint_path = f'checkpoints/model_epoch_{epoch+1}.pth'
+    torch.save({
+        'epoch': epoch + 1,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': epoch_loss,
+    }, checkpoint_path)
+    
+    # Optional: Remove old checkpoints to save space
+    if max_checkpoints_to_keep > 0:
+        checkpoint_files = sorted([f for f in os.listdir('checkpoints') 
+                                  if f.startswith('model_epoch_')])
+        while len(checkpoint_files) > max_checkpoints_to_keep:
+            os.remove(os.path.join('checkpoints', checkpoint_files[0]))
+            checkpoint_files.pop(0)
 
 # Save the final model.
 os.makedirs("checkpoints", exist_ok=True)

@@ -53,8 +53,8 @@ def process_canonicalized_file(input_path, output_path, max_bb_size):
     with open(input_path, "r") as f:
         lines = f.readlines()
     
-    prev_bb_timestamp = 0
     current_bb = []
+    bb_timestamp = 0
     
     with open(output_path, "w") as out:
         for line in lines:
@@ -79,6 +79,7 @@ def process_canonicalized_file(input_path, output_path, max_bb_size):
             
             # Add this instruction to the current basic block
             current_bb.append(line)
+            bb_timestamp += timestamp
             
             # Check if the opcode is a branch, jump, or return opcode
             if opcode in BRANCH_OPCODES or opcode in IJ_OPCODES or opcode in UJ_OPCODES:
@@ -86,11 +87,11 @@ def process_canonicalized_file(input_path, output_path, max_bb_size):
                 if len(current_bb) <= max_bb_size:
                     for inst in current_bb:
                         out.write(inst)
-                    out.write(f"BBTIME {timestamp} ENDBB\n")
+                    out.write(f"BBTIME {bb_timestamp} ENDBB\n")
                 
                 # Reset for the next basic block
                 current_bb = []
-                prev_bb_timestamp = timestamp
+                bb_timestamp = 0
         
         # Handle the last basic block if there's anything left
         if current_bb and len(current_bb) <= max_bb_size:

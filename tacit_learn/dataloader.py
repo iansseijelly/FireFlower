@@ -47,7 +47,7 @@ def parse_instruction_line(line):
     return fields
 
 class BasicBlockDataset(Dataset):
-    def __init__(self, vocab_path, file_path=None, max_block_len=64):
+    def __init__(self, vocab_path, file_paths=None, max_block_len=64):
         """
         Reads the file and parses basic blocks.
         Each basic block ends with a line like "BBTIME <value> ENDBB".
@@ -59,12 +59,13 @@ class BasicBlockDataset(Dataset):
         self.load_vocab(vocab_path)
         
         # If file_path is None, just initialize empty data structures
-        if file_path is None:
+        if file_paths is None:
             self.data = []
             return
-            
+        
         # Otherwise load the data
-        self.load_data(file_path)
+        for file_path in file_paths:
+            self.load_data(file_path)
 
     def load_vocab(self, vocab_path):
         # load the opcode vocab
