@@ -13,30 +13,15 @@ from torch.utils.tensorboard import SummaryWriter
 from tacit_learn.dataloader import BasicBlockDataset, collate_fn
 from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
 
-# =====================
-#   Hyperparameters
-# =====================
-DATA_FOLDER = "data/canonicalized"  # Your dataset file path.
-VOCAB_FILE = "vocab/opcodes.txt"
-BATCH_SIZE = 64
-NUM_EPOCHS = 10
-LEARNING_RATE = 1e-4
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-LOG_DIR = "./logs/ff_training_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# Weight for the block-level sum constraint.
-BB_LOSS_WEIGHT = 0.1
-
-# Configuration
-max_checkpoints_to_keep = 5  # Adjust as needed
+import constants
 
 # =====================
 #   Dataset & DataLoader
 # =====================
-training_files = glob.glob(os.path.join(DATA_FOLDER, "*.out"))
-train_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_paths=training_files)
+training_files = glob.glob(os.path.join(constants.DATA_FOLDER, "*.out"))
+train_dataset = BasicBlockDataset(vocab_path=constants.VOCAB_FILE, file_paths=training_files)
 train_loader = DataLoader(train_dataset, 
-                        batch_size=BATCH_SIZE, 
+                        batch_size=constants.BATCH_SIZE, 
                         collate_fn=collate_fn, 
                         shuffle=True,
                         pin_memory=True,
@@ -49,7 +34,6 @@ train_loader = DataLoader(train_dataset,
 # Adjust the vocabulary sizes as needed.
 NUM_INST = train_dataset.get_n_inst()
 NUM_REGS = train_dataset.get_n_reg()
-MAX_BLOCK_LEN = 64
 config = FireFlowerConfig(n_inst=NUM_INST, 
                           n_reg=NUM_REGS,
                           d_inst=int(sqrt(NUM_INST)),
@@ -59,7 +43,7 @@ config = FireFlowerConfig(n_inst=NUM_INST,
                           d_model=128,
                           n_head=4,
                           n_layers=2,
-                          n_pos=MAX_BLOCK_LEN,
+                          n_pos=constants.MAX_BLOCK_LEN,
                           d_pos=int(sqrt(NUM_REGS)))
 
 model = FireFlowerPredictor(config)
@@ -69,20 +53,20 @@ if torch.__version__ >= "2.0.0":
 else:
     print("Warning: torch version is less than 2.0.0, model will not be compiled.")
 
-model.to(DEVICE)
+model.to(constants.DEVICE)
 
 
 # =====================
 #   Loss & Optimizer
 # =====================
 mse_loss = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+optimizer = optim.AdamW(model.parameters(), lr=constants.LEARNING_RATE)
 max_grad_norm = 1.0
 
 # =====================
 #   TensorBoard Setup
 # =====================
-writer = SummaryWriter(LOG_DIR)
+writer = SummaryWriter(constants.LOG_DIR)
 
 # Function to log model parameter statistics
 def log_model_stats(model, step):
@@ -100,7 +84,7 @@ def log_model_stats(model, step):
 # =====================
 global_step = 0
 
-for epoch in range(NUM_EPOCHS):
+for epoch in range(constants.NUM_EPOCHS):
     model.train()
     running_loss = 0.0
     # Log learning rate at start of epoch
@@ -108,26 +92,33 @@ for epoch in range(NUM_EPOCHS):
     
     for batch_idx, batch in enumerate(train_loader):
         # Move batch to device.
-        instructions = {k: v.to(DEVICE) for k, v in batch["instructions"].items()}
-        # print(f"Max inst_id: {instructions['inst_id'].max().item()}, vocab size: {config.n_inst}")
-        # print(f"Max position: {batch['positions'].max().item()}, max allowed: {config.n_pos - 1}")
-        positions = batch["positions"].to(DEVICE)
-        bbtime = batch["bbtime"].to(DEVICE)  # shape: [B, 1]
-        # Our target is the TIMESTAMP field per instruction.
-        target = batch["target"].to(DEVICE)   # shape: [B, L, 1]
+        instructions = {k: v.to(constants.DEVICE) for k, v in batch["instructions"].items()}
+        positions = batch["positions"].to(constants.DEVICE)
+        bbtime = batch["bbtime"].to(constants.DEVICE)  # shape: [B, 1]
+        target = batch["target"].to(constants.DEVICE)   # shape: [B, L, 1]
+        mask = batch["padding_mask"].to(constants.DEVICE)
 
         optimizer.zero_grad()
 
         # Forward pass.
         preds = model(instructions, positions, bbtime)  # shape: [B, L, 1]
 
-        # Compute per-instruction regression loss.
-        reg_loss = mse_loss(preds, target)
+        # Apply mask to predictions and targets
+        masked_preds = preds * mask
+        masked_target = target * mask
+        
+        # Count valid (non-padding) instructions for proper averaging
+        num_valid = mask.sum()
+        
+        # Compute per-instruction regression loss (only on valid instructions)
+        if num_valid > 0:
+            reg_loss = torch.sum(((masked_preds - masked_target) ** 2)) / num_valid
+        else:
+            reg_loss = torch.tensor(0.0, device=constants.DEVICE)
 
         # Compute block-level sum loss.
         # Sum predictions over instructions (dim=1) and compare with bbtime.
-        # Note: our target for bbtime is a scalar per block.
-        pred_bbtime = preds.sum(dim=1)  # shape: [B, 1]
+        pred_bbtime = masked_preds.sum(dim=1)  # shape: [B, 1]
         bb_loss = mse_loss(pred_bbtime, bbtime)
 
         # After computing losses
@@ -139,7 +130,7 @@ for epoch in range(NUM_EPOCHS):
             # Optional: skip this batch
             breakpoint()
 
-        loss = reg_loss + BB_LOSS_WEIGHT * bb_loss
+        loss = reg_loss + constants.BB_LOSS_WEIGHT * bb_loss
 
         # Backpropagation.
         loss.backward()
@@ -173,7 +164,7 @@ for epoch in range(NUM_EPOCHS):
         # Log every few batches.
         if batch_idx % 10 == 0:
             avg_loss = running_loss / (batch_idx + 1)
-            print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Batch [{batch_idx}] Loss: {avg_loss:.4f}")
+            print(f"Epoch [{epoch+1}/{constants.NUM_EPOCHS}] Batch [{batch_idx}] Loss: {avg_loss:.4f}")
             writer.add_scalar("Loss/Total", avg_loss, global_step)
             writer.add_scalar("Loss/Regression", reg_loss.item(), global_step)
             writer.add_scalar("Loss/BB_Sum", bb_loss.item(), global_step)
@@ -204,20 +195,20 @@ for epoch in range(NUM_EPOCHS):
 
     # End-of-epoch logging.
     epoch_loss = running_loss / len(train_loader)
-    print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Average Loss: {epoch_loss:.4f}")
+    print(f"Epoch [{epoch+1}/{constants.NUM_EPOCHS}] Average Loss: {epoch_loss:.4f}")
     writer.add_scalar("Loss/Epoch", epoch_loss, epoch)
     
     # Log full model statistics at the end of each epoch
     log_model_stats(model, global_step)
     
     # Add sample predictions visualization (optional)
-    if epoch % 5 == 0 or epoch == NUM_EPOCHS - 1:
+    if epoch % 5 == 0 or epoch == constants.NUM_EPOCHS - 1:
         # Get a sample batch for visualization
         sample_batch = next(iter(train_loader))
-        sample_instructions = {k: v.to(DEVICE) for k, v in sample_batch["instructions"].items()}
-        sample_positions = sample_batch["positions"].to(DEVICE)
-        sample_bbtime = sample_batch["bbtime"].to(DEVICE)
-        sample_target = sample_batch["target"].to(DEVICE)
+        sample_instructions = {k: v.to(constants.DEVICE) for k, v in sample_batch["instructions"].items()}
+        sample_positions = sample_batch["positions"].to(constants.DEVICE)
+        sample_bbtime = sample_batch["bbtime"].to(constants.DEVICE)
+        sample_target = sample_batch["target"].to(constants.DEVICE)
         
         with torch.no_grad():
             sample_preds = model(sample_instructions, sample_positions, sample_bbtime)
@@ -240,14 +231,6 @@ for epoch in range(NUM_EPOCHS):
         'loss': epoch_loss,
     }, checkpoint_path)
     
-    # Optional: Remove old checkpoints to save space
-    if max_checkpoints_to_keep > 0:
-        checkpoint_files = sorted([f for f in os.listdir('checkpoints') 
-                                  if f.startswith('model_epoch_')])
-        while len(checkpoint_files) > max_checkpoints_to_keep:
-            os.remove(os.path.join('checkpoints', checkpoint_files[0]))
-            checkpoint_files.pop(0)
-
 # Save the final model.
 os.makedirs("checkpoints", exist_ok=True)
 torch.save(model.state_dict(), "checkpoints/model_final.pth")

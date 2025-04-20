@@ -11,14 +11,13 @@ import numpy as np
 # =====================
 #   Configuration
 # =====================
-CHECKPOINT_PATH = "checkpoints/model_final.pth"
 VOCAB_FILE = "vocab/opcodes.txt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def load_model():
+def load_model(model_path):
     """Load the trained model."""
     # Assume we're using the same dataset vocabulary for consistency
-    dummy_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_path=None)
+    dummy_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_paths=None)
     
     # Initialize model with the same configuration as during training
     NUM_INST = dummy_dataset.get_n_inst()
@@ -40,7 +39,15 @@ def load_model():
     )
     
     model = FireFlowerPredictor(config)
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
+    if torch.__version__ >= "2.0.0":
+        model = torch.compile(model)
+    
+    # Load the checkpoint
+    checkpoint = torch.load(model_path, map_location=DEVICE)
+    
+    # Check if it's a training checkpoint or just model weights
+    model.load_state_dict(checkpoint["model_state_dict"])
+    
     model.to(DEVICE)
     model.eval()
     
@@ -53,14 +60,14 @@ def predict_basic_block(model, dataset, file_path=None, input_text=None):
     Args:
         model: The trained FireFlowerPredictor model
         dataset: The BasicBlockDataset for handling input processing
-        file_path: Path to a file containing basic block(s)
+        file_paths: Path to a file containing basic block(s)
         input_text: Direct text input of basic block(s)
     
     Returns:
         A list of predictions with instruction details
     """
     if file_path is None and input_text is None:
-        raise ValueError("Either file_path or input_text must be provided")
+        raise ValueError("Either file_paths or input_text must be provided")
     
     # Create a temporary file if input_text is provided
     if input_text is not None:
@@ -72,7 +79,7 @@ def predict_basic_block(model, dataset, file_path=None, input_text=None):
     
     # Load the data
     try:
-        test_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_path=file_path)
+        test_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_paths=[file_path])
         
         # Process all basic blocks in the file
         results = []
@@ -131,7 +138,7 @@ def predict_basic_block(model, dataset, file_path=None, input_text=None):
     
     except Exception as e:
         # Clean up temporary file if we created one and an error occurred
-        if input_text is not None and 'file_path' in locals():
+        if input_text is not None and 'file_paths' in locals():
             os.unlink(file_path)
         raise e
 
@@ -168,6 +175,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-f", "--file", help="Path to file containing basic block(s)")
     group.add_argument("-t", "--text", help="Basic block text directly as input")
+    parser.add_argument("-m", "--model", help="Path to model checkpoint")
     parser.add_argument("-o", "--output", help="Output file path (default: output to console)")
     
     args = parser.parse_args()
@@ -175,7 +183,11 @@ def main():
     try:
         # Load model
         print("Loading model...")
-        model, dataset = load_model()
+        if args.model is None:
+            MODEL_PATH = "checkpoints/model_final.pth"
+        else:
+            MODEL_PATH = args.model
+        model, dataset = load_model(MODEL_PATH)
         
         # Make predictions
         print("Running predictions...")

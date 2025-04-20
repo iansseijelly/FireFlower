@@ -9,22 +9,27 @@ from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
 from math import sqrt
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import random
+import glob
 
 # =====================
 #   Configuration
 # =====================
 CHECKPOINT_PATH = "checkpoints/model_final.pth"  # Path to your trained model
-DATA_FILE = "data/rocket-hello.canonicalized.out"  # Test/validation data file
+DATA_FOLDER = "data/canonicalized"  # Test/validation data file
 VOCAB_FILE = "vocab/opcodes.txt"
-BATCH_SIZE = 16  # Can be larger for evaluation than training
+BATCH_SIZE = 64  
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 RESULTS_DIR = "./evaluation_results"
+SAMPLE_BATCHES = 100  # Number of batches to evaluate on (set to None to use all data)
+
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # =====================
 #   Dataset & DataLoader
 # =====================
-test_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_path=DATA_FILE)
+training_files = glob.glob(os.path.join(DATA_FOLDER, "*.out"))
+test_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_paths=training_files)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=False)
 
 # =====================
@@ -47,6 +52,8 @@ config = FireFlowerConfig(n_inst=NUM_INST,
                           d_pos=int(sqrt(NUM_REGS)))
 
 model = FireFlowerPredictor(config)
+if torch.__version__ >= "2.0.0":
+    model = torch.compile(model)
 model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
 model.to(DEVICE)
 model.eval()  # Set model to evaluation mode
@@ -215,6 +222,7 @@ def format_results(results):
     
     return "\n".join(output)
 
+
 def run_evaluation():
     """Run evaluation with proper handling of variable sequence lengths."""
     all_preds = []
@@ -222,24 +230,36 @@ def run_evaluation():
     all_bb_predictions = []
     all_bb_times = []
     
-    print("Running evaluation...")
-    
+    total_batches = len(test_loader)
+    # Determine how many batches to process
+    batches_to_process = SAMPLE_BATCHES if SAMPLE_BATCHES and SAMPLE_BATCHES < total_batches else total_batches
+    print(f"Evaluating on {batches_to_process} batches out of {total_batches} total batches")
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
+            # Stop after processing the specified number of batches
+            if SAMPLE_BATCHES and batch_idx >= SAMPLE_BATCHES:
+                break
+                
             # Move batch to device
             instructions = {k: v.to(DEVICE) for k, v in batch["instructions"].items()}
             positions = batch["positions"].to(DEVICE)
             bbtime = batch["bbtime"].float().to(DEVICE)  # Convert to float
             target = batch["target"].float().to(DEVICE)  # Convert to float
+            padding_mask = batch["padding_mask"].to(DEVICE)
             
             # Forward pass
             preds = model(instructions, positions, bbtime)
+
+            # Apply mask to predictions and targets
+            masked_preds = preds * padding_mask
+            masked_target = target * padding_mask
             
             # Calculate basic block predictions (sum of instruction predictions)
-            bb_preds = preds.sum(dim=1)
+            bb_preds = masked_preds.sum(dim=1)
             
             # Store prediction results for formatting
-            for i in range(preds.size(0)):  # Iterate through each sample in batch
+            for i in range(masked_preds.size(0)):  # Iterate through each sample in batch
                 block_data = {
                     "block_idx": batch_idx * BATCH_SIZE + i,
                     "total_predicted": bb_preds[i].item(),
@@ -248,8 +268,8 @@ def run_evaluation():
                 }
                 
                 # Get instruction details
-                for j in range(preds.size(1)):  # Iterate through each instruction
-                    if j < target.size(1) and target[i, j, 0] != 0:  # Skip padding
+                for j in range(masked_preds.size(1)):  # Iterate through each instruction
+                    if j < masked_target.size(1) and masked_target[i, j, 0] != 0:  # Skip padding
                         # Try to get instruction text if available
                         instr_text = batch.get("instruction_text", [["Unknown"]])[i][j] if j < len(batch.get("instruction_text", [[]])[i]) else "Unknown"
                         # Try to get opcode if available
@@ -263,23 +283,23 @@ def run_evaluation():
                             "position": j,
                             "opcode": opcode,
                             "instruction": instr_text,
-                            "predicted_latency": preds[i, j, 0].item(),
-                            "actual_latency": target[i, j, 0].item()
+                            "predicted_latency": masked_preds[i, j, 0].item(),
+                            "actual_latency": masked_target[i, j, 0].item()
                         })
                 
                 all_preds.append(block_data)
             
             # Immediately flatten and filter out padding before storing
             # This avoids the dimension mismatch when concatenating later
-            batch_mask = target.reshape(-1) != 0  # Filter out padding (assumes 0 is padding)
+            batch_mask = masked_target.reshape(-1) != 0  # Filter out padding (assumes 0 is padding)
             
             # Collect flattened results for metrics calculation
-            all_targets_flat.append(target.reshape(-1)[batch_mask].cpu())
+            all_targets_flat.append(masked_target.reshape(-1)[batch_mask].cpu())
             all_bb_predictions.append(bb_preds.cpu())
             all_bb_times.append(bbtime.cpu())
             
             if batch_idx % 10 == 0:
-                print(f"Processed {batch_idx+1}/{len(test_loader)} batches")
+                print(f"Processed {batch_idx+1}/{batches_to_process} batches")
 
     # save all predictions and targets in pretty text format
     with open(os.path.join(RESULTS_DIR, 'predictions.txt'), 'w') as f:

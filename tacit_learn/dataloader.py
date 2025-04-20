@@ -47,7 +47,7 @@ def parse_instruction_line(line):
     return fields
 
 class BasicBlockDataset(Dataset):
-    def __init__(self, vocab_path, file_paths=None, max_block_len=64):
+    def __init__(self, vocab_path, file_paths: list | None = None, max_block_len=64):
         """
         Reads the file and parses basic blocks.
         Each basic block ends with a line like "BBTIME <value> ENDBB".
@@ -203,6 +203,10 @@ def collate_fn(batch):
     # Target can be part of instructions, e.g., instructions["timestamp"]
     batch_targets = batch_instructions["timestamp"]
     
+    # Create padding mask: 1 for real instructions, 0 for padding
+    # Shape: [batch_size, max_len, 1]
+    padding_mask = (batch_instructions["inst_id"] != 0).unsqueeze(-1).float()
+    
     # Collect instruction text (no need to pad as this is just a list)
     batch_instruction_text = [item["instruction_text"] for item in batch]
 
@@ -212,4 +216,5 @@ def collate_fn(batch):
         "bbtime": batch_bbtime,
         "target": batch_targets,
         "instruction_text": batch_instruction_text,  # Add the instruction text to the batch
+        "padding_mask": padding_mask,  # Add padding mask to the batch
     }
