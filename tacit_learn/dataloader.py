@@ -1,6 +1,8 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import re
+import random
+import numpy as np
 
 # A helper function to parse a single instruction line.
 def parse_instruction_line(line):
@@ -47,7 +49,7 @@ def parse_instruction_line(line):
     return fields
 
 class BasicBlockDataset(Dataset):
-    def __init__(self, vocab_path, file_paths: list | None = None, max_block_len=64):
+    def __init__(self, vocab_path, file_paths: list | None = None, max_block_len=64, shuffle_blocks=True):
         """
         Reads the file and parses basic blocks.
         Each basic block ends with a line like "BBTIME <value> ENDBB".
@@ -66,6 +68,10 @@ class BasicBlockDataset(Dataset):
         # Otherwise load the data
         for file_path in file_paths:
             self.load_data(file_path)
+            
+        # Shuffle blocks to avoid first-batch bias
+        if shuffle_blocks and self.blocks:
+            random.shuffle(self.blocks)
 
     def load_vocab(self, vocab_path):
         # load the opcode vocab
@@ -184,6 +190,7 @@ def collate_fn(batch):
     max_len = max(item["positions"].size(0) for item in batch)
     
     def pad_tensor(tensor, pad_value=0):
+        # For timestamp tensors, use a distinctive padding value to make it obvious
         # tensor shape is [L, ...]
         L = tensor.size(0)
         if L < max_len:
@@ -218,3 +225,75 @@ def collate_fn(batch):
         "instruction_text": batch_instruction_text,  # Add the instruction text to the batch
         "padding_mask": padding_mask,  # Add padding mask to the batch
     }
+
+def split_dataset(dataset, val_ratio=0.1, seed=42):
+    """
+    Splits a dataset into training and validation sets.
+    
+    Args:
+        dataset: The dataset to split
+        val_ratio: The proportion of data to use for validation (default: 0.1 = 10%)
+        seed: Random seed for reproducibility
+        
+    Returns:
+        train_dataset, val_dataset: The split datasets
+    """
+    # Calculate the number of samples for validation
+    dataset_size = len(dataset)
+    val_size = int(val_ratio * dataset_size)
+    train_size = dataset_size - val_size
+    
+    # Use PyTorch's random_split to create the split
+    generator = torch.Generator().manual_seed(seed)
+    train_dataset, val_dataset = random_split(
+        dataset, 
+        [train_size, val_size], 
+        generator=generator
+    )
+    
+    return train_dataset, val_dataset
+
+def create_train_val_dataloaders(vocab_path, file_paths, batch_size=32, val_ratio=0.1, 
+                                max_block_len=64, shuffle_train=True, seed=42):
+    """
+    Creates training and validation dataloaders from the given files.
+    
+    Args:
+        vocab_path: Path to vocabulary file
+        file_paths: List of file paths containing instruction data
+        batch_size: Batch size for dataloaders
+        val_ratio: Proportion of data to use for validation
+        max_block_len: Maximum length of instruction blocks
+        shuffle_train: Whether to shuffle the training data
+        seed: Random seed for reproducibility
+        
+    Returns:
+        train_loader, val_loader: DataLoader objects for training and validation
+    """
+    # Set random seeds for reproducibility
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Create the full dataset
+    full_dataset = BasicBlockDataset(vocab_path, file_paths, max_block_len, shuffle_blocks=False)
+    
+    # Split into train and validation
+    train_dataset, val_dataset = split_dataset(full_dataset, val_ratio, seed)
+    
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size,
+        shuffle=shuffle_train,
+        collate_fn=collate_fn
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size,
+        shuffle=False,  # No need to shuffle validation data
+        collate_fn=collate_fn
+    )
+    
+    return train_loader, val_loader

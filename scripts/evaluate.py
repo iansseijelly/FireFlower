@@ -4,33 +4,46 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
-from tacit_learn.dataloader import BasicBlockDataset, collate_fn
+from tacit_learn.dataloader import BasicBlockDataset, collate_fn, create_train_val_dataloaders
 from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
 from math import sqrt
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import random
 import glob
+from scipy import stats  # Add this import
+import pickle
 
-# =====================
-#   Configuration
-# =====================
-CHECKPOINT_PATH = "checkpoints/model_final.pth"  # Path to your trained model
-DATA_FOLDER = "data/canonicalized"  # Test/validation data file
-VOCAB_FILE = "vocab/opcodes.txt"
-BATCH_SIZE = 64  
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-RESULTS_DIR = "./evaluation_results"
-SAMPLE_BATCHES = 100  # Number of batches to evaluate on (set to None to use all data)
+import constants
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
+# Create result directories
+os.makedirs(constants.RESULTS_DIR, exist_ok=True)
+os.makedirs(os.path.join(constants.RESULTS_DIR, 'data'), exist_ok=True)
+os.makedirs(os.path.join(constants.RESULTS_DIR, 'human'), exist_ok=True)
 
 # =====================
 #   Dataset & DataLoader
 # =====================
-training_files = glob.glob(os.path.join(DATA_FOLDER, "*.out"))
-test_dataset = BasicBlockDataset(vocab_path=VOCAB_FILE, file_paths=training_files)
-test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=False)
+training_files = glob.glob(os.path.join(constants.DATA_FOLDER, "*.out"))
+
+# Create train and validation datasets
+train_loader, val_loader = create_train_val_dataloaders(
+    vocab_path=constants.VOCAB_FILE,
+    file_paths=training_files,
+    batch_size=constants.BATCH_SIZE,
+    val_ratio=0.1,  # Same ratio as used in training
+    max_block_len=constants.MAX_BLOCK_LEN,
+    shuffle_train=False,  # No need to shuffle for evaluation
+    seed=42  # Same seed as training for consistent split
+)
+
+# Use validation set for evaluation
+test_loader = val_loader
+
+# Get access to the original dataset to determine vocabulary sizes
+test_dataset = test_loader.dataset.dataset  # Access the original dataset through the random_split subset
+while hasattr(test_dataset, 'dataset'):
+    test_dataset = test_dataset.dataset
 
 # =====================
 #   Load Model
@@ -38,24 +51,33 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, collate_fn=collate
 # Initialize model with the same configuration as during training
 NUM_INST = test_dataset.get_n_inst()
 NUM_REGS = test_dataset.get_n_reg()
-MAX_BLOCK_LEN = 64
+MAX_BLOCK_LEN = constants.MAX_BLOCK_LEN
 config = FireFlowerConfig(n_inst=NUM_INST, 
                           n_reg=NUM_REGS,
                           d_inst=int(sqrt(NUM_INST)),
                           d_reg=int(sqrt(NUM_REGS)),
                           d_imm=int(sqrt(NUM_INST)),
                           d_bb=int(sqrt(NUM_INST)),
-                          d_model=128,
-                          n_head=4,
-                          n_layers=2,
+                          d_model=constants.D_MODEL,
+                          n_head=constants.N_HEAD,
+                          n_layers=constants.N_LAYERS,
                           n_pos=MAX_BLOCK_LEN,
                           d_pos=int(sqrt(NUM_REGS)))
 
 model = FireFlowerPredictor(config)
 if torch.__version__ >= "2.0.0":
     model = torch.compile(model)
-model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-model.to(DEVICE)
+
+# Try to load the best model from training, fall back to specified checkpoint path
+if os.path.exists('checkpoints/best_model.pth'):
+    checkpoint = torch.load('checkpoints/best_model.pth', map_location=constants.DEVICE)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"Loaded best model from epoch {checkpoint['epoch']} with validation loss {checkpoint.get('val_loss', 'N/A')}")
+else:
+    model.load_state_dict(torch.load(constants.CHECKPOINT_PATH, map_location=constants.DEVICE))
+    print(f"Loaded model from {constants.CHECKPOINT_PATH}")
+
+model.to(constants.DEVICE)
 model.eval()  # Set model to evaluation mode
 
 # =====================
@@ -101,21 +123,71 @@ def calculate_metrics(predictions, targets, bb_predictions, bb_times):
     return metrics, pred_filtered, target_filtered, bb_pred, bb_target
 
 # =====================
+#   OLS Regression
+# =====================
+def ols_regression(predictions, targets):
+    """Perform OLS regression on predictions and targets."""
+    # Perform linear regression
+    slope, intercept, r_value, p_value, std_err = stats.linregress(predictions, targets)
+    
+    # Calculate predicted values using the regression line
+    predicted = slope * predictions + intercept
+    
+    # Calculate additional metrics
+    mse = mean_squared_error(targets, predicted)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(targets, predicted)
+    nrmse = rmse / (targets.max() - targets.min())
+    
+    # Return all statistics and predicted values
+    return {
+        'slope': slope,
+        'intercept': intercept,
+        'r_squared': r_value**2,
+        'r_value': r_value,
+        'p_value': p_value,
+        'std_err': std_err,
+        'mse': mse,
+        'rmse': rmse,
+        'mae': mae,
+        'nrmse': nrmse,
+    }
+
 #   Visualization Functions
 # =====================
-def plot_predictions_vs_targets(predictions, targets, level="instruction"):
+def plot_predictions_vs_targets(predictions, targets, level="instruction", jitter=False):
     """Create scatter plot of predictions vs targets."""
     plt.figure(figsize=(10, 8))
-    plt.scatter(targets, predictions, alpha=0.5)
+    
+    # Add small jitter to spread out discrete values
+    if jitter:
+        jitter_amount = 0.03  # Adjust this value based on your data scale
+        x_jitter = targets + np.random.normal(0, jitter_amount, size=targets.shape)
+        y_jitter = predictions + np.random.normal(0, jitter_amount, size=predictions.shape)
+    else:
+        x_jitter = targets
+        y_jitter = predictions
+    
+    # Ensure positive values for log scale (add small epsilon)
+    epsilon = 1e-10
+    x_jitter = np.maximum(x_jitter, epsilon)
+    y_jitter = np.maximum(y_jitter, epsilon)
+    
+    plt.scatter(x_jitter, y_jitter, alpha=0.3)
+    
+    # Set log scale for both axes
+    plt.xscale('log')
+    plt.yscale('log')
     
     # Plot the perfect prediction line
     min_val = min(np.min(predictions), np.min(targets))
     max_val = max(np.max(predictions), np.max(targets))
+    min_val = max(min_val, epsilon)  # Ensure positive for log scale
     plt.plot([min_val, max_val], [min_val, max_val], 'r--')
     
     plt.xlabel(f'Actual {level} latency')
     plt.ylabel(f'Predicted {level} latency')
-    plt.title(f'{level.capitalize()} Level: Predicted vs Actual Latency')
+    plt.title(f'{level.capitalize()} Level: Predicted vs Actual Latency (Log Scale)')
     plt.grid(True, alpha=0.3)
     
     # Add correlation coefficient
@@ -126,7 +198,7 @@ def plot_predictions_vs_targets(predictions, targets, level="instruction"):
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
     
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f'{level}_predictions_vs_targets.png'))
+    plt.savefig(os.path.join(constants.RESULTS_DIR, f'{level}_predictions_vs_targets.png'))
     plt.close()
 
 def plot_error_distribution(predictions, targets, level="instruction"):
@@ -150,7 +222,7 @@ def plot_error_distribution(predictions, targets, level="instruction"):
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
     
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f'{level}_error_distribution.png'))
+    plt.savefig(os.path.join(constants.RESULTS_DIR, f'{level}_error_distribution.png'))
     plt.close()
 
 def plot_relative_error(predictions, targets, level="instruction"):
@@ -174,7 +246,7 @@ def plot_relative_error(predictions, targets, level="instruction"):
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
     
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f'{level}_relative_error.png'))
+    plt.savefig(os.path.join(constants.RESULTS_DIR, f'{level}_relative_error.png'))
     plt.close()
 
 # =====================
@@ -225,28 +297,28 @@ def format_results(results):
 
 def run_evaluation():
     """Run evaluation with proper handling of variable sequence lengths."""
-    all_preds = []
-    all_targets_flat = []
-    all_bb_predictions = []
-    all_bb_times = []
+    print(f"Evaluating model on validation set ({len(test_loader.dataset)} samples)")
+    
+    all_predictions = []
+    all_block_data = []
     
     total_batches = len(test_loader)
     # Determine how many batches to process
-    batches_to_process = SAMPLE_BATCHES if SAMPLE_BATCHES and SAMPLE_BATCHES < total_batches else total_batches
+    batches_to_process = constants.SAMPLE_BATCHES if constants.SAMPLE_BATCHES and constants.SAMPLE_BATCHES < total_batches else total_batches
     print(f"Evaluating on {batches_to_process} batches out of {total_batches} total batches")
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
             # Stop after processing the specified number of batches
-            if SAMPLE_BATCHES and batch_idx >= SAMPLE_BATCHES:
+            if constants.SAMPLE_BATCHES and batch_idx >= constants.SAMPLE_BATCHES:
                 break
                 
-            # Move batch to device
-            instructions = {k: v.to(DEVICE) for k, v in batch["instructions"].items()}
-            positions = batch["positions"].to(DEVICE)
-            bbtime = batch["bbtime"].float().to(DEVICE)  # Convert to float
-            target = batch["target"].float().to(DEVICE)  # Convert to float
-            padding_mask = batch["padding_mask"].to(DEVICE)
+            # Move batch to constants.DEVICE
+            instructions = {k: v.to(constants.DEVICE) for k, v in batch["instructions"].items()}
+            positions = batch["positions"].to(constants.DEVICE)
+            bbtime = batch["bbtime"].float().to(constants.DEVICE)  # Convert to float
+            target = batch["target"].float().to(constants.DEVICE)  # Convert to float
+            padding_mask = batch["padding_mask"].to(constants.DEVICE)
             
             # Forward pass
             preds = model(instructions, positions, bbtime)
@@ -258,10 +330,10 @@ def run_evaluation():
             # Calculate basic block predictions (sum of instruction predictions)
             bb_preds = masked_preds.sum(dim=1)
             
-            # Store prediction results for formatting
+            # Store data for each block in batch
             for i in range(masked_preds.size(0)):  # Iterate through each sample in batch
                 block_data = {
-                    "block_idx": batch_idx * BATCH_SIZE + i,
+                    "block_idx": batch_idx * constants.BATCH_SIZE + i,
                     "total_predicted": bb_preds[i].item(),
                     "total_actual": bbtime[i].item(),
                     "instructions": []
@@ -287,85 +359,42 @@ def run_evaluation():
                             "actual_latency": masked_target[i, j, 0].item()
                         })
                 
-                all_preds.append(block_data)
+                all_block_data.append(block_data)
             
-            # Immediately flatten and filter out padding before storing
-            # This avoids the dimension mismatch when concatenating later
-            batch_mask = masked_target.reshape(-1) != 0  # Filter out padding (assumes 0 is padding)
-            
-            # Collect flattened results for metrics calculation
-            all_targets_flat.append(masked_target.reshape(-1)[batch_mask].cpu())
-            all_bb_predictions.append(bb_preds.cpu())
-            all_bb_times.append(bbtime.cpu())
+            # Collect data for metrics calculation
+            batch_predictions = {
+                "instruction_predictions": masked_preds.cpu().numpy(),
+                "instruction_targets": masked_target.cpu().numpy(),
+                "bb_predictions": bb_preds.cpu().numpy(),
+                "bb_targets": bbtime.cpu().numpy(),
+                "padding_mask": padding_mask.cpu().numpy()
+            }
+            all_predictions.append(batch_predictions)
             
             if batch_idx % 10 == 0:
                 print(f"Processed {batch_idx+1}/{batches_to_process} batches")
-
-    # save all predictions and targets in pretty text format
-    with open(os.path.join(RESULTS_DIR, 'predictions.txt'), 'w') as f:
-        f.write(format_results(all_preds))
     
-    # Concatenate all predictions and targets for metrics
-    all_targets_flat = torch.cat(all_targets_flat, dim=0)
-    all_bb_predictions = torch.cat(all_bb_predictions, dim=0)
-    all_bb_times = torch.cat(all_bb_times, dim=0)
+    # Save the raw prediction data in compressed format
+    data_path = os.path.join(constants.RESULTS_DIR, 'data', 'prediction_data.pkl')
+    with open(data_path, 'wb') as f:
+        pickle.dump(all_predictions, f)
     
-    # Convert to numpy for metric calculation
-    pred_instr = torch.tensor([instr["predicted_latency"] for block in all_preds for instr in block["instructions"]]).numpy()
-    target_instr = torch.tensor([instr["actual_latency"] for block in all_preds for instr in block["instructions"]]).numpy()
-    bb_preds = all_bb_predictions.reshape(-1).numpy()
-    bb_targets = all_bb_times.reshape(-1).numpy()
-    
-    # Calculate metrics directly
-    metrics = {
-        # Instruction-level metrics
-        "instr_mse": mean_squared_error(target_instr, pred_instr),
-        "instr_rmse": np.sqrt(mean_squared_error(target_instr, pred_instr)),
-        "instr_mae": mean_absolute_error(target_instr, pred_instr),
-        "instr_r2": r2_score(target_instr, pred_instr),
-        "instr_corr": np.corrcoef(target_instr, pred_instr)[0, 1],
-        "instr_mean_error": np.mean(pred_instr - target_instr),
-        "instr_mean_abs_error": np.mean(np.abs(pred_instr - target_instr)),
-        "instr_mean_rel_error": np.mean(np.abs(pred_instr - target_instr) / (target_instr + 1e-8)),
+    # Also save the structured block data for easier access
+    block_data_path = os.path.join(constants.RESULTS_DIR, 'data', 'block_data.pkl')
+    with open(block_data_path, 'wb') as f:
+        pickle.dump(all_block_data, f)
         
-        # Basic block level metrics
-        "bb_mse": mean_squared_error(bb_targets, bb_preds),
-        "bb_rmse": np.sqrt(mean_squared_error(bb_targets, bb_preds)),
-        "bb_mae": mean_absolute_error(bb_targets, bb_preds),
-        "bb_r2": r2_score(bb_targets, bb_preds),
-        "bb_corr": np.corrcoef(bb_targets, bb_preds)[0, 1],
-        "bb_mean_error": np.mean(bb_preds - bb_targets),
-        "bb_mean_abs_error": np.mean(np.abs(bb_preds - bb_targets)),
-        "bb_mean_rel_error": np.mean(np.abs(bb_preds - bb_targets) / (bb_targets + 1e-8)),
-    }
+    # Save human-readable formatted results
+    human_readable_path = os.path.join(constants.RESULTS_DIR, 'human', 'predictions.txt')
+    with open(human_readable_path, 'w') as f:
+        f.write(format_results(all_block_data))
     
-    # Print metrics
-    print("\n===== Evaluation Results =====")
-    print("\nInstruction-level Metrics:")
-    for key in sorted([k for k in metrics.keys() if k.startswith('instr')]):
-        print(f"{key}: {metrics[key]:.6f}")
+    print(f"\nEvaluation complete.")
+    print(f"Raw prediction data saved to: {data_path}")
+    print(f"Block data saved to: {block_data_path}")
+    print(f"Human-readable results saved to: {human_readable_path}")
     
-    print("\nBasic Block-level Metrics:")
-    for key in sorted([k for k in metrics.keys() if k.startswith('bb')]):
-        print(f"{key}: {metrics[key]:.6f}")
-    
-    # Create visualizations
-    print("\nGenerating visualizations...")
-    plot_predictions_vs_targets(pred_instr, target_instr, level="instruction")
-    plot_error_distribution(pred_instr, target_instr, level="instruction")
-    plot_relative_error(pred_instr, target_instr, level="instruction")
-    
-    plot_predictions_vs_targets(bb_preds, bb_targets, level="basic_block")
-    plot_error_distribution(bb_preds, bb_targets, level="basic_block")
-    plot_relative_error(bb_preds, bb_targets, level="basic_block")
-    
-    # Save metrics to CSV
-    metrics_df = pd.DataFrame([metrics])
-    metrics_df.to_csv(os.path.join(RESULTS_DIR, 'evaluation_metrics.csv'), index=False)
-    
-    print(f"\nEvaluation complete. Results saved to {RESULTS_DIR}")
-    
-    return metrics
+    return all_block_data, all_predictions
 
 if __name__ == "__main__":
     run_evaluation() 

@@ -24,6 +24,8 @@ import glob
 import tempfile
 import shutil
 
+import constants
+
 # capture only 3 groups C0: [cycle] pc=[...] and ... inst=[...]
 pattern = re.compile(r"C0:\s+(\d+)\s+.*pc=\[([0-9a-fA-F]+)\].*inst=\[([0-9a-fA-F]+)\]")
 
@@ -104,7 +106,7 @@ if __name__ == "__main__":
 
 
     # Set max basic block size threshold
-    MAX_BB_SIZE = 64  # Adjust this value as needed
+    MAX_BB_SIZE = constants.MAX_BB_SIZE  # Adjust this value as needed
     
     # Create output and temp directories
     os.makedirs("data/canonicalized", exist_ok=True)

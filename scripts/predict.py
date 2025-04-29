@@ -99,7 +99,7 @@ def predict_basic_block(model, dataset, file_path=None, input_text=None):
                 target = batch["target"].float().to(DEVICE)
                 
                 # Forward pass
-                preds = model(instructions, positions, bbtime)
+                preds = torch.round(model(instructions, positions, bbtime))
                 
                 # Extract original instruction text and other details
                 instr_text = batch["instruction_text"][0]  # Get first (and only) item in the batch

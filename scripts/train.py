@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # Import your dataset and model.
 # Adjust the import paths if necessary.
-from tacit_learn.dataloader import BasicBlockDataset, collate_fn
+from tacit_learn.dataloader import BasicBlockDataset, collate_fn, create_train_val_dataloaders
 from tacit_learn.model import FireFlowerPredictor, FireFlowerConfig
 
 import constants
@@ -19,32 +19,48 @@ import constants
 #   Dataset & DataLoader
 # =====================
 training_files = glob.glob(os.path.join(constants.DATA_FOLDER, "*.out"))
-train_dataset = BasicBlockDataset(vocab_path=constants.VOCAB_FILE, file_paths=training_files)
-train_loader = DataLoader(train_dataset, 
-                        batch_size=constants.BATCH_SIZE, 
-                        collate_fn=collate_fn, 
-                        shuffle=True,
-                        pin_memory=True,
-                        num_workers=4)
 
+# Replace the existing dataset and dataloader setup with our new function
+train_loader, val_loader = create_train_val_dataloaders(
+    vocab_path=constants.VOCAB_FILE,
+    file_paths=training_files,
+    batch_size=constants.BATCH_SIZE,
+    val_ratio=0.1,  # Use 10% of data for validation
+    max_block_len=constants.MAX_BLOCK_LEN,
+    shuffle_train=True,
+    seed=42  # For reproducibility
+)
+
+# Get a sample from the first batch to determine vocabulary sizes
+sample_batch = next(iter(train_loader))
+if hasattr(train_loader.dataset.dataset, 'get_n_inst'):
+    # Access the original dataset through the random_split subset
+    NUM_INST = train_loader.dataset.dataset.get_n_inst()
+    NUM_REGS = train_loader.dataset.dataset.get_n_reg()
+else:
+    # Fallback if structure is different
+    first_dataset = train_loader.dataset
+    while hasattr(first_dataset, 'dataset'):
+        first_dataset = first_dataset.dataset
+    NUM_INST = first_dataset.get_n_inst()
+    NUM_REGS = first_dataset.get_n_reg()
 
 # =====================
 #   Instantiate the Model
 # =====================
-# Adjust the vocabulary sizes as needed.
-NUM_INST = train_dataset.get_n_inst()
-NUM_REGS = train_dataset.get_n_reg()
 config = FireFlowerConfig(n_inst=NUM_INST, 
                           n_reg=NUM_REGS,
                           d_inst=int(sqrt(NUM_INST)),
                           d_reg=int(sqrt(NUM_REGS)),
                           d_imm=int(sqrt(NUM_INST)),
                           d_bb=int(sqrt(NUM_INST)),
-                          d_model=128,
-                          n_head=4,
-                          n_layers=2,
+                          d_model=constants.D_MODEL,
+                          n_head=constants.N_HEAD,
+                          n_layers=constants.N_LAYERS,
                           n_pos=constants.MAX_BLOCK_LEN,
                           d_pos=int(sqrt(NUM_REGS)))
+
+torch.set_float32_matmul_precision('high')
 
 model = FireFlowerPredictor(config)
 
@@ -80,11 +96,86 @@ def log_model_stats(model, step):
                 writer.add_scalar(f"gradient_norm/{name}", param.grad.data.norm().item(), step)
 
 # =====================
+#   Evaluation Function
+# =====================
+def evaluate(model, val_loader, device):
+    model.eval()
+    val_loss = 0.0
+    val_reg_loss = 0.0
+    val_bb_loss = 0.0
+    val_fp_loss = 0.0
+    val_fn_loss = 0.0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            # Move batch to device.
+            instructions = {k: v.to(device) for k, v in batch["instructions"].items()}
+            positions = batch["positions"].to(device)
+            bbtime = batch["bbtime"].to(device)  # shape: [B, 1]
+            target = batch["target"].to(device)   # shape: [B, L, 1]
+            mask = batch["padding_mask"].to(device)
+
+            # Forward pass.
+            preds = model(instructions, positions, bbtime)  # shape: [B, L, 1]
+
+            # Apply mask to predictions and targets
+            masked_preds = preds * mask
+            masked_target = target * mask
+            
+            # Count valid (non-padding) instructions for proper averaging
+            num_valid = mask.sum()
+            
+            # Compute per-instruction regression loss (only on valid instructions)
+            if num_valid > 0:
+                reg_loss = torch.sum(((masked_preds - masked_target) ** 2)) / num_valid
+            else:
+                reg_loss = torch.tensor(0.0, device=device)
+
+            # False positives and negatives
+            false_pos = torch.sum((torch.round(masked_preds) == 1) & (masked_target != 1)) / num_valid if num_valid > 0 else torch.tensor(0.0, device=device)
+            false_neg = torch.sum((torch.round(masked_preds) != 1) & (masked_target == 1)) / num_valid if num_valid > 0 else torch.tensor(0.0, device=device)
+
+            # Compute block-level sum loss.
+            pred_bbtime = masked_preds.sum(dim=1)  # shape: [B, 1]
+            bb_loss = mse_loss(pred_bbtime, bbtime)
+
+            # Combined loss
+            loss = constants.REG_LOSS_WEIGHT * reg_loss + constants.BB_LOSS_WEIGHT * bb_loss + \
+                   constants.FP_LOSS_WEIGHT * false_pos + constants.FN_LOSS_WEIGHT * false_neg
+            
+            val_loss += loss.item()
+            val_reg_loss += reg_loss.item()
+            val_bb_loss += bb_loss.item()
+            val_fp_loss += false_pos.item()
+            val_fn_loss += false_neg.item()
+            num_batches += 1
+    
+    # Calculate average losses
+    val_loss /= num_batches
+    val_reg_loss /= num_batches
+    val_bb_loss /= num_batches
+    val_fp_loss /= num_batches
+    val_fn_loss /= num_batches
+    
+    return {
+        "loss": val_loss,
+        "reg_loss": val_reg_loss,
+        "bb_loss": val_bb_loss,
+        "fp_loss": val_fp_loss,
+        "fn_loss": val_fn_loss
+    }
+
+# =====================
 #   Training Loop
 # =====================
 global_step = 0
+best_val_loss = float('inf')
+patience = constants.PATIENCE
+patience_counter = 0
 
 for epoch in range(constants.NUM_EPOCHS):
+    # Training phase
     model.train()
     running_loss = 0.0
     # Log learning rate at start of epoch
@@ -116,6 +207,10 @@ for epoch in range(constants.NUM_EPOCHS):
         else:
             reg_loss = torch.tensor(0.0, device=constants.DEVICE)
 
+        # penalize for incorrectly predicting a 1 as not a 1, and vice versa
+        false_pos = torch.sum((torch.round(masked_preds) == 1) & (masked_target != 1)) / num_valid if num_valid > 0 else torch.tensor(0.0, device=constants.DEVICE)
+        false_neg = torch.sum((torch.round(masked_preds) != 1) & (masked_target == 1)) / num_valid if num_valid > 0 else torch.tensor(0.0, device=constants.DEVICE)
+
         # Compute block-level sum loss.
         # Sum predictions over instructions (dim=1) and compare with bbtime.
         pred_bbtime = masked_preds.sum(dim=1)  # shape: [B, 1]
@@ -130,7 +225,8 @@ for epoch in range(constants.NUM_EPOCHS):
             # Optional: skip this batch
             breakpoint()
 
-        loss = reg_loss + constants.BB_LOSS_WEIGHT * bb_loss
+        loss = constants.REG_LOSS_WEIGHT * reg_loss + constants.BB_LOSS_WEIGHT * bb_loss + \
+                constants.FP_LOSS_WEIGHT * false_pos + constants.FN_LOSS_WEIGHT * false_neg
 
         # Backpropagation.
         loss.backward()
@@ -165,38 +261,68 @@ for epoch in range(constants.NUM_EPOCHS):
         if batch_idx % 10 == 0:
             avg_loss = running_loss / (batch_idx + 1)
             print(f"Epoch [{epoch+1}/{constants.NUM_EPOCHS}] Batch [{batch_idx}] Loss: {avg_loss:.4f}")
-            writer.add_scalar("Loss/Total", avg_loss, global_step)
-            writer.add_scalar("Loss/Regression", reg_loss.item(), global_step)
-            writer.add_scalar("Loss/BB_Sum", bb_loss.item(), global_step)
+            writer.add_scalar("Loss/Train/Total", avg_loss, global_step)
+            writer.add_scalar("Loss/Train/Regression", reg_loss.item(), global_step)
+            writer.add_scalar("Loss/Train/BB_Diff", bb_loss.item(), global_step)
+            writer.add_scalar("Loss/Train/FP", false_pos.item(), global_step)
+            writer.add_scalar("Loss/Train/FN", false_neg.item(), global_step)
             
-            # Log prediction and target statistics
-            writer.add_scalar("Predictions/Min", preds.min().item(), global_step)
-            writer.add_scalar("Predictions/Max", preds.max().item(), global_step)
-            writer.add_scalar("Predictions/Mean", preds.mean().item(), global_step)
-            writer.add_scalar("Predictions/Std", preds.std().item(), global_step)
-            
-            writer.add_scalar("Targets/Min", target.min().item(), global_step)
-            writer.add_scalar("Targets/Max", target.max().item(), global_step)
-            writer.add_scalar("Targets/Mean", target.mean().item(), global_step)
-            writer.add_scalar("Targets/Std", target.std().item(), global_step)
-            
-            writer.add_scalar("BBTime/Min", bbtime.min().item(), global_step)
-            writer.add_scalar("BBTime/Max", bbtime.max().item(), global_step)
-            writer.add_scalar("BBTime/Mean", bbtime.mean().item(), global_step)
-            
-            # Log prediction sum vs actual bbtime
-            writer.add_scalar("BBTime/PredictionSum", pred_bbtime.mean().item(), global_step)
-            writer.add_scalar("BBTime/Actual", bbtime.mean().item(), global_step)
-            writer.add_scalar("BBTime/Diff", (pred_bbtime - bbtime).abs().mean().item(), global_step)
+            writer.add_scalar("BBTime/Train/Diff", (pred_bbtime - bbtime).abs().mean().item(), global_step)
             
             # Log model parameter statistics every few batches
             if batch_idx % 50 == 0:
                 log_model_stats(model, global_step)
 
-    # End-of-epoch logging.
-    epoch_loss = running_loss / len(train_loader)
-    print(f"Epoch [{epoch+1}/{constants.NUM_EPOCHS}] Average Loss: {epoch_loss:.4f}")
-    writer.add_scalar("Loss/Epoch", epoch_loss, epoch)
+    # End-of-epoch training logging
+    train_epoch_loss = running_loss / len(train_loader)
+    print(f"Epoch [{epoch+1}/{constants.NUM_EPOCHS}] Training Average Loss: {train_epoch_loss:.4f}")
+    writer.add_scalar("Loss/Train/Epoch", train_epoch_loss, epoch)
+    
+    # Validation phase
+    val_metrics = evaluate(model, val_loader, constants.DEVICE)
+    val_loss = val_metrics["loss"]
+    
+    # Log validation metrics
+    print(f"Epoch [{epoch+1}/{constants.NUM_EPOCHS}] Validation Loss: {val_loss:.4f}")
+    writer.add_scalar("Loss/Val/Total", val_loss, epoch)
+    writer.add_scalar("Loss/Val/Regression", val_metrics["reg_loss"], epoch)
+    writer.add_scalar("Loss/Val/BB_Diff", val_metrics["bb_loss"], epoch)
+    writer.add_scalar("Loss/Val/FP", val_metrics["fp_loss"], epoch)
+    writer.add_scalar("Loss/Val/FN", val_metrics["fn_loss"], epoch)
+    
+    # Early stopping and model saving logic
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        patience_counter = 0
+        
+        # Save the best model
+        os.makedirs("checkpoints", exist_ok=True)
+        best_model_path = 'checkpoints/best_model.pth'
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_epoch_loss,
+            'val_loss': val_loss,
+        }, best_model_path)
+        print(f"Saved best model with validation loss: {val_loss:.4f}")
+    else:
+        patience_counter += 1
+        print(f"Validation loss did not improve. Patience: {patience_counter}/{patience}")
+        
+        if patience_counter >= patience:
+            print(f"Early stopping triggered after {epoch+1} epochs")
+            break
+    
+    # Save model checkpoint for this epoch
+    checkpoint_path = f'checkpoints/model_epoch_{epoch+1}.pth'
+    torch.save({
+        'epoch': epoch + 1,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'train_loss': train_epoch_loss,
+        'val_loss': val_loss,
+    }, checkpoint_path)
     
     # Log full model statistics at the end of each epoch
     log_model_stats(model, global_step)
@@ -204,7 +330,7 @@ for epoch in range(constants.NUM_EPOCHS):
     # Add sample predictions visualization (optional)
     if epoch % 5 == 0 or epoch == constants.NUM_EPOCHS - 1:
         # Get a sample batch for visualization
-        sample_batch = next(iter(train_loader))
+        sample_batch = next(iter(val_loader))  # Use validation data for consistent samples
         sample_instructions = {k: v.to(constants.DEVICE) for k, v in sample_batch["instructions"].items()}
         sample_positions = sample_batch["positions"].to(constants.DEVICE)
         sample_bbtime = sample_batch["bbtime"].to(constants.DEVICE)
@@ -221,15 +347,6 @@ for epoch in range(constants.NUM_EPOCHS):
                     continue
                 sample_text += f"Instr {i}: Pred={sample_preds[b, i, 0].item():.4f}, Target={sample_target[b, i, 0].item():.4f}\n"
             writer.add_text(f"Predictions_Example_{b}", sample_text, epoch)
-
-    # Save model after every epoch
-    checkpoint_path = f'checkpoints/model_epoch_{epoch+1}.pth'
-    torch.save({
-        'epoch': epoch + 1,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': epoch_loss,
-    }, checkpoint_path)
     
 # Save the final model.
 os.makedirs("checkpoints", exist_ok=True)
